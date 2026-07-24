@@ -166,6 +166,7 @@ jobs:
           WORKFLOW_FILE: 'renew.yml'
           BRANCH: ${{ github.ref_name }}
           PROXY: ${{ env.PROXY_READY == 'true' && 'socks5://127.0.0.1:1080' || '' }}
+          CAPTCHA_API_KEY: ${{ secrets.CAPTCHA_API_KEY }}  # 2captcha API Key
         run: |
           if [ -n "$PROXY" ]; then
             echo "🔄 使用代理: $PROXY"
@@ -175,7 +176,7 @@ jobs:
           python3 renew.py
 
       # ============================================================
-      # 上传截图（便于调试）
+      # 上传截图
       # ============================================================
       - name: 📸 上传截图
         if: always()
