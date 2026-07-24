@@ -2,15 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-Host2Play 自动续期脚本
-触发频率：每 470 分钟（7小时50分）由 cron-job.org 调用
-功能：
-- 访问续期页面，提取 reCAPTCHA sitekey
-- 通过 2captcha 打码获取验证令牌
-- 提交续期请求，解析新的到期时间
-- 通过 Telegram 通知结果（使用北京时间 UTC+8，并附带续期链接）
-- 自动管理 cron-job.org 间隔任务（若 Job ID 不存在则新建）
-- 将到期时间写入 expiry.txt 并提交到仓库
+Host2Play 自动续期脚本（增强版）
+- 使用 Session 保持 Cookies
+- 模拟完整浏览器请求头
+- 自动提取 CSRF Token（如需要）
+- 支持重试机制
 """
 
 import os
@@ -23,25 +19,43 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 import pytz
 
-# ==================== 配置（从环境变量读取） ====================
+# ==================== 配置 ====================
 RENEW_URL = "https://host2play.gratis/server/renew?i=d78082ca-90f1-4d7c-afe4-8196a1d6e101"
 EXPIRY_FILE = "expiry.txt"
 
-# 从 GitHub Secrets 注入
+# 环境变量
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 CRONJOB_API_KEY = os.getenv("CRONJOB_API_KEY")
-CRONJOB_JOB_ID = os.getenv("CRONJOB_JOB_ID")          # 若为空则新建
+CRONJOB_JOB_ID = os.getenv("CRONJOB_JOB_ID")
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")
-GH_TOKEN = os.getenv("GH_TOKEN")                      # GitHub Token（需具备 workflow 权限）
+GH_TOKEN = os.getenv("GH_TOKEN")
 REPO_OWNER = os.getenv("REPO_OWNER")
 REPO_NAME = os.getenv("REPO_NAME")
 WORKFLOW_FILE = os.getenv("WORKFLOW_FILE", "renew.yml")
 BRANCH = os.getenv("BRANCH", "main")
 
+# ==================== 会话管理 ====================
+def create_session():
+    """创建带有完整浏览器请求头的 Session"""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+    })
+    return session
+
 # ==================== Telegram 通知 ====================
 def send_tg_message(text):
-    """发送 Telegram 消息"""
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("Telegram credentials missing, skip notification.")
         return
@@ -55,7 +69,6 @@ def send_tg_message(text):
 
 # ==================== 到期时间读写与提交 ====================
 def read_expiry():
-    """从文件读取上次记录的到期时间（ISO格式）"""
     if os.path.exists(EXPIRY_FILE):
         with open(EXPIRY_FILE, 'r') as f:
             date_str = f.read().strip()
@@ -64,12 +77,10 @@ def read_expiry():
     return None
 
 def write_expiry(dt):
-    """写入新的到期时间（ISO格式）"""
     with open(EXPIRY_FILE, 'w') as f:
         f.write(dt.isoformat())
 
 def commit_expiry_file():
-    """提交 expiry.txt 到仓库（使用 [skip ci] 避免循环触发）"""
     os.system('git config user.name "github-actions[bot]"')
     os.system('git config user.email "github-actions[bot]@users.noreply.github.com"')
     os.system('git add expiry.txt')
@@ -77,13 +88,11 @@ def commit_expiry_file():
     os.system('git push')
 
 # ==================== reCAPTCHA 处理 ====================
-def get_recaptcha_sitekey(page_url):
-    """从续期页面提取 reCAPTCHA sitekey"""
-    resp = requests.get(page_url, timeout=15)
+def get_recaptcha_sitekey(session, page_url):
+    """使用 session 获取页面并提取 sitekey"""
+    resp = session.get(page_url, timeout=15)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, 'html.parser')
-
-    # 常见 sitekey 位置：script 中的 sitekey 字段或 data-sitekey 属性
     for script in soup.find_all('script'):
         if script.string and 'sitekey' in script.string:
             match = re.search(r'sitekey\s*:\s*"([^"]+)"', script.string)
@@ -95,15 +104,11 @@ def get_recaptcha_sitekey(page_url):
     input_tag = soup.find('input', {'name': 'g-recaptcha-response'})
     if input_tag and input_tag.get('data-sitekey'):
         return input_tag['data-sitekey']
-
-    raise Exception("Unable to find reCAPTCHA sitekey on page")
+    raise Exception("Unable to find reCAPTCHA sitekey")
 
 def solve_captcha_with_2captcha(sitekey, page_url):
-    """使用 2captcha 解决 reCAPTCHA v2，返回验证令牌"""
     if not CAPTCHA_API_KEY:
-        raise Exception("CAPTCHA_API_KEY environment variable missing")
-
-    # 提交任务
+        raise Exception("CAPTCHA_API_KEY missing")
     submit_url = "http://2captcha.com/in.php"
     params = {
         "key": CAPTCHA_API_KEY,
@@ -116,14 +121,11 @@ def solve_captcha_with_2captcha(sitekey, page_url):
     result = resp.json()
     if result.get("status") != 1:
         raise Exception(f"2captcha submit error: {result}")
-
     captcha_id = result.get("request")
     if not captcha_id:
         raise Exception("No captcha ID returned")
-
-    # 轮询结果
     poll_url = "http://2captcha.com/res.php"
-    for _ in range(60):  # 最多等待 60 * 5 = 300 秒
+    for _ in range(60):
         time.sleep(5)
         poll_params = {
             "key": CAPTCHA_API_KEY,
@@ -140,39 +142,62 @@ def solve_captcha_with_2captcha(sitekey, page_url):
         raise Exception(f"2captcha error: {data}")
     raise Exception("2captcha polling timeout")
 
-# ==================== 续期核心操作 ====================
+# ==================== 续期核心操作（增强版） ====================
 def perform_renewal():
-    """
-    执行续期流程，返回新的到期时间（datetime 对象）
-    注意：需要根据实际网站抓包调整请求 URL、参数和响应解析
-    """
-    # 1. 获取 sitekey
-    sitekey = get_recaptcha_sitekey(RENEW_URL)
+    """使用 Session 执行完整续期流程"""
+    session = create_session()
+
+    # 1. 首次 GET 页面（获取 Cookies 和 sitekey）
+    print("Fetching renewal page...")
+    sitekey = get_recaptcha_sitekey(session, RENEW_URL)
     print(f"Got sitekey: {sitekey}")
 
     # 2. 打码
     token = solve_captcha_with_2captcha(sitekey, RENEW_URL)
     print("Got captcha token")
 
-    # 3. 模拟点击 Renew 按钮
-    # 请根据浏览器开发者工具抓包确认实际的 API 地址和参数
-    renew_api = "https://host2play.gratis/server/renew"   # 示例地址，请核实
-    payload = {
-        "i": "d78082ca-90f1-4d7c-afe4-8196a1d6e101",      # 示例参数，请核实
-        "g-recaptcha-response": token,
-        # 可能还需要 CSRF token 等其他字段，请从页面提取
-    }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Referer": RENEW_URL,
-    }
-    resp = requests.post(renew_api, data=payload, headers=headers, timeout=30)
-    if resp.status_code != 200:
-        raise Exception(f"Renewal request failed with status {resp.status_code}: {resp.text[:200]}")
+    # 3. 提取 CSRF Token（若有）—— 从页面中查找 name="csrf_token" 的 input
+    # 先再次 GET 页面（确保最新），或直接从之前响应的 soup 中提取，我们重新请求一次以获取最新 token
+    resp = session.get(RENEW_URL, timeout=15)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    csrf_token = None
+    csrf_input = soup.find('input', {'name': 'csrf_token'}) or soup.find('input', {'name': '_token'})
+    if csrf_input:
+        csrf_token = csrf_input.get('value')
+        print(f"Found CSRF token: {csrf_token}")
 
-    # 4. 解析新的到期时间
-    # 假设响应为 JSON 包含 "expiry" 字段，若为 HTML 则尝试从页面提取
+    # 4. 构建续期请求（需根据实际抓包调整）
+    renew_api = "https://host2play.gratis/server/renew"   # 请核实实际 API 地址
+    payload = {
+        "i": "d78082ca-90f1-4d7c-afe4-8196a1d6e101",
+        "g-recaptcha-response": token,
+    }
+    if csrf_token:
+        payload["csrf_token"] = csrf_token   # 或 "_token"
+
+    # 设置 POST 请求头（保持 session 中的通用头，增加 Referer）
+    headers = {
+        "Referer": RENEW_URL,
+        "Origin": "https://host2play.gratis",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    # 使用 session.post 自动带上 cookies
+    print("Sending renewal request...")
+    resp = session.post(renew_api, data=payload, headers=headers, timeout=30)
+
+    if resp.status_code != 200:
+        # 尝试重试一次（可能因 token 过期）
+        print(f"Renewal failed with status {resp.status_code}, retrying after 5s...")
+        time.sleep(5)
+        # 重新获取 CSRF token 和 sitekey（可能变化）
+        sitekey = get_recaptcha_sitekey(session, RENEW_URL)
+        token = solve_captcha_with_2captcha(sitekey, RENEW_URL)
+        resp = session.post(renew_api, data=payload, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            raise Exception(f"Renewal request failed after retry: {resp.status_code} - {resp.text[:200]}")
+
+    # 5. 解析新的到期时间
     try:
         data = resp.json()
         expiry_str = data.get("expiry") or data.get("new_expiry") or data.get("expires")
@@ -189,7 +214,6 @@ def perform_renewal():
         else:
             raise Exception("Could not parse expiry date from response")
 
-    # 解析为 datetime，支持多种格式
     try:
         new_expiry = datetime.fromisoformat(expiry_str)
     except ValueError:
@@ -202,19 +226,12 @@ def perform_renewal():
         else:
             raise Exception(f"Unrecognized date format: {expiry_str}")
 
-    # 如果未指定时区，假设为 UTC
     if new_expiry.tzinfo is None:
         new_expiry = new_expiry.replace(tzinfo=pytz.UTC)
-
     return new_expiry
 
-# ==================== cron-job.org 管理 ====================
+# ==================== cron-job.org 管理（不变） ====================
 def ensure_cronjob():
-    """
-    创建或更新 cron-job.org 任务，使其每隔 470 分钟触发一次当前工作流。
-    若 CRONJOB_JOB_ID 存在则更新，否则新建。
-    使用符合 GitHub API 规范的请求头和正文。
-    """
     if not CRONJOB_API_KEY:
         print("CRONJOB_API_KEY missing, skip cronjob setup.")
         return
@@ -222,9 +239,7 @@ def ensure_cronjob():
         print("GH_TOKEN missing, cannot set up cron-job trigger.")
         return
 
-    # GitHub Actions workflow_dispatch 触发 URL
     trigger_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/workflows/{WORKFLOW_FILE}/dispatches"
-    # 必须包含的请求头（根据 GitHub API 要求）
     headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {GH_TOKEN}",
@@ -233,13 +248,12 @@ def ensure_cronjob():
     }
     body = {"ref": BRANCH}
 
-    # 构建 interval 任务数据（每 470 分钟）
     job_data = {
         "name": "Host2Play Renewal (470min)",
         "url": trigger_url,
         "request_method": "POST",
         "request_headers": headers,
-        "request_body": json.dumps(body),   # 必须是 JSON 字符串
+        "request_body": json.dumps(body),
         "type": "interval",
         "interval_value": 470,
         "interval_unit": "minutes",
@@ -265,14 +279,13 @@ def ensure_cronjob():
             new_id = result.get("id") or result.get("job_id")
             if new_id:
                 print(f"Created cron-job with ID {new_id}")
-                print("Please save this ID as CRONJOB_JOB_ID secret for future updates.")
+                print("Please save this ID as CRONJOB_JOB_ID secret.")
             else:
                 print("Cron-job created, but no ID returned.")
         else:
             print("Cron-job updated successfully.")
     except Exception as e:
         print(f"Failed to manage cron-job: {e}")
-        # 不抛出异常，以免影响续期主流程
 
 # ==================== 主入口 ====================
 def main():
@@ -280,11 +293,9 @@ def main():
         new_expiry = perform_renewal()
         print(f"Renewal successful, new expiry: {new_expiry}")
 
-        # 写入到期时间并提交到仓库
         write_expiry(new_expiry)
         commit_expiry_file()
 
-        # ---------- 使用北京时间（UTC+8）发送通知 ----------
         beijing_tz = pytz.timezone('Asia/Shanghai')
         now_beijing = datetime.now(beijing_tz)
         expiry_beijing = new_expiry.astimezone(beijing_tz)
@@ -297,7 +308,6 @@ def main():
         )
         send_tg_message(msg)
 
-        # 确保 cron-job 存在（首次运行或更新配置）
         ensure_cronjob()
 
     except Exception as e:
