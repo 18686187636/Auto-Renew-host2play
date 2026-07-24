@@ -59,6 +59,18 @@ def screenshot_step(sb, name):
     sb.save_screenshot(f"step_{name}_{ts}.png")
     print(f"📸 Screenshot: step_{name}_{ts}.png")
 
+# ==================== 获取出口 IP ====================
+def get_outgoing_ip(sb):
+    """通过浏览器访问 ip.sb 获取当前出口 IP"""
+    try:
+        sb.open("https://api.ip.sb/ip")
+        sb.wait_for_ready_state_complete()
+        time.sleep(2)
+        ip = sb.get_text('body').strip()
+        return ip
+    except Exception as e:
+        return f"获取失败: {e}"
+
 # ==================== Ace Data Cloud 打码集成 ====================
 CAPTCHA_API_URL = "https://api.acedata.cloud/captcha/recognition/recaptcha2"
 
@@ -293,6 +305,17 @@ def perform_renewal_with_browser():
         print("ℹ️ 未使用代理")
 
     with SB(**sb_kwargs) as sb:
+        # ---- 0. 检查出口 IP ----
+        print("🌍 正在获取当前出口 IP...")
+        try:
+            sb.open("https://api.ip.sb/ip")
+            sb.wait_for_ready_state_complete()
+            time.sleep(2)
+            ip = sb.get_text('body').strip()
+            print(f"📍 当前出口 IP: {ip}")
+        except Exception as e:
+            print(f"⚠️ 无法获取出口 IP: {e}")
+
         # ---- 1. 加载续期页面，等待 Cloudflare 挑战完成 ----
         print("🌐 Opening renewal page...")
         max_retries = 3
