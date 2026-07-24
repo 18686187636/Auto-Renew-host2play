@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-Host2Play 自动续期脚本（增强版）
-- 使用 Session 保持 Cookies
-- 模拟完整浏览器请求头
-- 自动提取 CSRF Token（如需要）
-- 支持重试机制
+Host2Play 自动续期脚本（SeleniumBase 版本）
+- 使用真实浏览器绕过 Cloudflare / reCAPTCHA
+- 自动点击 Renew server 按钮
+- 解析最新到期时间
+- 发送北京时间 Telegram 通知
+- 管理 cron-job.org 间隔任务（470 分钟）
+- 将到期时间写入 expiry.txt 并提交
 """
 
 import os
@@ -15,66 +17,38 @@ import json
 import time
 import re
 import requests
-from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
+from seleniumbase import SB
 
 # ==================== 配置 ====================
 RENEW_URL = "https://host2play.gratis/server/renew?i=d78082ca-90f1-4d7c-afe4-8196a1d6e101"
 EXPIRY_FILE = "expiry.txt"
 
-# 环境变量
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 CRONJOB_API_KEY = os.getenv("CRONJOB_API_KEY")
 CRONJOB_JOB_ID = os.getenv("CRONJOB_JOB_ID")
-CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")
+CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")   # 备用
 GH_TOKEN = os.getenv("GH_TOKEN")
 REPO_OWNER = os.getenv("REPO_OWNER")
 REPO_NAME = os.getenv("REPO_NAME")
 WORKFLOW_FILE = os.getenv("WORKFLOW_FILE", "renew.yml")
 BRANCH = os.getenv("BRANCH", "main")
 
-# ==================== 会话管理 ====================
-def create_session():
-    """创建带有完整浏览器请求头的 Session"""
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Cache-Control": "max-age=0",
-    })
-    return session
-
-# ==================== Telegram 通知 ====================
+# ==================== 辅助函数 ====================
 def send_tg_message(text):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("Telegram credentials missing, skip notification.")
         return
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TG_CHAT_ID, "text": text}
     try:
-        r = requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json={"chat_id": TG_CHAT_ID, "text": text}, timeout=10)
         r.raise_for_status()
     except Exception as e:
-        print(f"Failed to send TG message: {e}")
+        print(f"Telegram send error: {e}")
 
-# ==================== 到期时间读写与提交 ====================
-def read_expiry():
-    if os.path.exists(EXPIRY_FILE):
-        with open(EXPIRY_FILE, 'r') as f:
-            date_str = f.read().strip()
-            if date_str:
-                return datetime.fromisoformat(date_str)
-    return None
+def get_beijing_time():
+    return datetime.now(pytz.timezone('Asia/Shanghai')).strftime("%Y-%m-%d %H:%M:%S")
 
 def write_expiry(dt):
     with open(EXPIRY_FILE, 'w') as f:
@@ -84,161 +58,170 @@ def commit_expiry_file():
     os.system('git config user.name "github-actions[bot]"')
     os.system('git config user.email "github-actions[bot]@users.noreply.github.com"')
     os.system('git add expiry.txt')
-    os.system('git commit -m "Update expiry date [skip ci]" || echo "No changes to commit"')
+    os.system('git commit -m "Update expiry date [skip ci]" || echo "No changes"')
     os.system('git push')
 
-# ==================== reCAPTCHA 处理 ====================
-def get_recaptcha_sitekey(session, page_url):
-    """使用 session 获取页面并提取 sitekey"""
-    resp = session.get(page_url, timeout=15)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    for script in soup.find_all('script'):
-        if script.string and 'sitekey' in script.string:
-            match = re.search(r'sitekey\s*:\s*"([^"]+)"', script.string)
-            if match:
-                return match.group(1)
-    elem = soup.find(attrs={"data-sitekey": True})
-    if elem:
-        return elem['data-sitekey']
-    input_tag = soup.find('input', {'name': 'g-recaptcha-response'})
-    if input_tag and input_tag.get('data-sitekey'):
-        return input_tag['data-sitekey']
-    raise Exception("Unable to find reCAPTCHA sitekey")
+def screenshot_step(sb, name):
+    ts = int(time.time() * 1000)
+    filename = f"step_{name}_{ts}.png"
+    sb.save_screenshot(filename)
+    print(f"📸 Screenshot: {filename}")
 
-def solve_captcha_with_2captcha(sitekey, page_url):
-    if not CAPTCHA_API_KEY:
-        raise Exception("CAPTCHA_API_KEY missing")
-    submit_url = "http://2captcha.com/in.php"
-    params = {
-        "key": CAPTCHA_API_KEY,
-        "method": "userrecaptcha",
-        "googlekey": sitekey,
-        "pageurl": page_url,
-        "json": 1
-    }
-    resp = requests.post(submit_url, data=params, timeout=20)
-    result = resp.json()
-    if result.get("status") != 1:
-        raise Exception(f"2captcha submit error: {result}")
-    captcha_id = result.get("request")
-    if not captcha_id:
-        raise Exception("No captcha ID returned")
-    poll_url = "http://2captcha.com/res.php"
-    for _ in range(60):
-        time.sleep(5)
-        poll_params = {
-            "key": CAPTCHA_API_KEY,
-            "action": "get",
-            "id": captcha_id,
-            "json": 1
-        }
-        resp = requests.get(poll_url, params=poll_params, timeout=10)
-        data = resp.json()
-        if data.get("status") == 1:
-            return data.get("request")
-        if data.get("request") == "CAPCHA_NOT_READY":
-            continue
-        raise Exception(f"2captcha error: {data}")
-    raise Exception("2captcha polling timeout")
+# ==================== 续期核心（SeleniumBase） ====================
+def perform_renewal_with_browser():
+    """
+    使用 SeleniumBase 浏览器自动化完成续期
+    返回 (成功标志, 新的到期时间 datetime 对象或 None, 错误信息)
+    """
+    expiry_dt = None
+    error_msg = None
+    success = False
 
-# ==================== 续期核心操作（增强版） ====================
-def perform_renewal():
-    """使用 Session 执行完整续期流程"""
-    session = create_session()
+    with SB(uc=True, headless=True, page_load_strategy='eager') as sb:
+        print("🌐 Opening renewal page...")
+        sb.open(RENEW_URL)
+        sb.wait_for_ready_state_complete()
+        sb.sleep(3)
+        screenshot_step(sb, "page_loaded")
 
-    # 1. 首次 GET 页面（获取 Cookies 和 sitekey）
-    print("Fetching renewal page...")
-    sitekey = get_recaptcha_sitekey(session, RENEW_URL)
-    print(f"Got sitekey: {sitekey}")
+        # 1. 尝试获取当前到期时间（用于对比）
+        current_expiry_str = None
+        try:
+            # 根据实际页面结构调整选择器，这里假设时间显示在某个元素中
+            # 常见模式：<span id="expiry">2026-07-25</span> 或类似
+            expiry_elem = sb.find_element('span:contains("Expires")', timeout=5)
+            if expiry_elem:
+                text = expiry_elem.text
+                match = re.search(r'(\d{4}-\d{2}-\d{2})', text)
+                if match:
+                    current_expiry_str = match.group(1)
+                    print(f"📅 Current expiry (raw): {current_expiry_str}")
+        except Exception as e:
+            print(f"⚠️ Could not read current expiry: {e}")
 
-    # 2. 打码
-    token = solve_captcha_with_2captcha(sitekey, RENEW_URL)
-    print("Got captcha token")
+        # 2. 点击 Renew server 按钮
+        print("🔘 Clicking Renew server button...")
+        try:
+            # 多种选择器备选
+            btn_selectors = [
+                'button.btn-primary:contains("Renew server")',
+                'button:contains("Renew server")',
+                'button[onclick*="renew()"]'
+            ]
+            clicked = False
+            for sel in btn_selectors:
+                try:
+                    sb.uc_click(sel, timeout=5)
+                    clicked = True
+                    print(f"✅ Clicked using selector: {sel}")
+                    break
+                except:
+                    continue
+            if not clicked:
+                # 尝试 JavaScript 点击
+                btn = sb.find_element('button:contains("Renew server")', timeout=5)
+                sb.driver.execute_script("arguments[0].click();", btn)
+                clicked = True
+                print("✅ Clicked via JavaScript")
+            if not clicked:
+                raise Exception("No clickable Renew button found")
+        except Exception as e:
+            error_msg = f"Click Renew button failed: {e}"
+            screenshot_step(sb, "click_failed")
+            return False, None, error_msg
 
-    # 3. 提取 CSRF Token（若有）—— 从页面中查找 name="csrf_token" 的 input
-    # 先再次 GET 页面（确保最新），或直接从之前响应的 soup 中提取，我们重新请求一次以获取最新 token
-    resp = session.get(RENEW_URL, timeout=15)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    csrf_token = None
-    csrf_input = soup.find('input', {'name': 'csrf_token'}) or soup.find('input', {'name': '_token'})
-    if csrf_input:
-        csrf_token = csrf_input.get('value')
-        print(f"Found CSRF token: {csrf_token}")
+        screenshot_step(sb, "after_click")
 
-    # 4. 构建续期请求（需根据实际抓包调整）
-    renew_api = "https://host2play.gratis/server/renew"   # 请核实实际 API 地址
-    payload = {
-        "i": "d78082ca-90f1-4d7c-afe4-8196a1d6e101",
-        "g-recaptcha-response": token,
-    }
-    if csrf_token:
-        payload["csrf_token"] = csrf_token   # 或 "_token"
+        # 3. 等待续期完成（可能需要几秒）
+        print("⏳ Waiting for renewal to complete...")
+        time.sleep(5)   # 等待 AJAX 处理
 
-    # 设置 POST 请求头（保持 session 中的通用头，增加 Referer）
-    headers = {
-        "Referer": RENEW_URL,
-        "Origin": "https://host2play.gratis",
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-    # 使用 session.post 自动带上 cookies
-    print("Sending renewal request...")
-    resp = session.post(renew_api, data=payload, headers=headers, timeout=30)
+        # 4. 检查续期是否成功（看是否有成功提示或到期时间变化）
+        # 尝试查找成功消息
+        success_msg = None
+        try:
+            alert = sb.find_element('.alert-success', timeout=3)
+            if alert:
+                success_msg = alert.text
+                print(f"✅ Success alert: {success_msg}")
+        except:
+            pass
 
-    if resp.status_code != 200:
-        # 尝试重试一次（可能因 token 过期）
-        print(f"Renewal failed with status {resp.status_code}, retrying after 5s...")
-        time.sleep(5)
-        # 重新获取 CSRF token 和 sitekey（可能变化）
-        sitekey = get_recaptcha_sitekey(session, RENEW_URL)
-        token = solve_captcha_with_2captcha(sitekey, RENEW_URL)
-        resp = session.post(renew_api, data=payload, headers=headers, timeout=30)
-        if resp.status_code != 200:
-            raise Exception(f"Renewal request failed after retry: {resp.status_code} - {resp.text[:200]}")
+        # 若没有成功消息，则尝试重新获取到期时间，看是否更新
+        # 刷新页面或直接在当前页面找新时间
+        # 重新加载页面以获取最新数据（续期后可能页面刷新）
+        print("🔄 Refreshing page to get updated expiry...")
+        sb.open(RENEW_URL)   # 重新打开页面
+        sb.wait_for_ready_state_complete()
+        sb.sleep(2)
+        screenshot_step(sb, "after_reload")
 
-    # 5. 解析新的到期时间
-    try:
-        data = resp.json()
-        expiry_str = data.get("expiry") or data.get("new_expiry") or data.get("expires")
-        if not expiry_str:
-            raise Exception("No expiry field in JSON response")
-    except json.JSONDecodeError:
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        text = soup.get_text()
-        match = re.search(r'Expires? on:?\s*(\d{4}-\d{2}-\d{2})', text, re.IGNORECASE)
-        if not match:
-            match = re.search(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', text)
-        if match:
-            expiry_str = match.group(1)
+        # 提取新的到期时间
+        new_expiry_str = None
+        try:
+            # 尝试多种选择器
+            selectors = [
+                'span:contains("Expires")',
+                'div:contains("Expires")',
+                'span.fw-bold',
+                '.expiry-date',
+                '#expiry'
+            ]
+            for sel in selectors:
+                try:
+                    elem = sb.find_element(sel, timeout=3)
+                    if elem:
+                        text = elem.text
+                        match = re.search(r'(\d{4}-\d{2}-\d{2})', text)
+                        if match:
+                            new_expiry_str = match.group(1)
+                            break
+                except:
+                    continue
+            if not new_expiry_str:
+                # 也许在页面源代码中
+                page_source = sb.get_page_source()
+                match = re.search(r'Expires? on:?\s*(\d{4}-\d{2}-\d{2})', page_source, re.IGNORECASE)
+                if match:
+                    new_expiry_str = match.group(1)
+            if new_expiry_str:
+                print(f"📅 New expiry (raw): {new_expiry_str}")
+                # 解析为 datetime (假设 UTC)
+                try:
+                    expiry_dt = datetime.strptime(new_expiry_str, "%Y-%m-%d")
+                    expiry_dt = expiry_dt.replace(tzinfo=pytz.UTC)
+                    success = True
+                except ValueError:
+                    error_msg = f"Invalid expiry format: {new_expiry_str}"
+            else:
+                error_msg = "Could not find new expiry date after renewal"
+        except Exception as e:
+            error_msg = f"Error parsing expiry: {e}"
+
+        if success:
+            print(f"✅ Renewal successful, new expiry: {expiry_dt}")
+            # 如果续期成功但没有成功消息，可以补充
+            if not success_msg:
+                success_msg = "Renewal completed"
         else:
-            raise Exception("Could not parse expiry date from response")
-
-    try:
-        new_expiry = datetime.fromisoformat(expiry_str)
-    except ValueError:
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            if not error_msg:
+                error_msg = "Renewal failed (no expiry update detected)"
+            # 尝试获取错误提示
             try:
-                new_expiry = datetime.strptime(expiry_str, fmt)
-                break
-            except ValueError:
-                continue
-        else:
-            raise Exception(f"Unrecognized date format: {expiry_str}")
+                err = sb.find_element('.alert-danger', timeout=2)
+                if err:
+                    error_msg = err.text
+            except:
+                pass
+            screenshot_step(sb, "renewal_failed")
 
-    if new_expiry.tzinfo is None:
-        new_expiry = new_expiry.replace(tzinfo=pytz.UTC)
-    return new_expiry
+    return success, expiry_dt, error_msg
 
-# ==================== cron-job.org 管理（不变） ====================
+# ==================== cron-job.org 管理（同前） ====================
 def ensure_cronjob():
-    if not CRONJOB_API_KEY:
-        print("CRONJOB_API_KEY missing, skip cronjob setup.")
+    if not CRONJOB_API_KEY or not GH_TOKEN:
+        print("Missing CRONJOB_API_KEY or GH_TOKEN, skip cronjob setup.")
         return
-    if not GH_TOKEN:
-        print("GH_TOKEN missing, cannot set up cron-job trigger.")
-        return
-
     trigger_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/workflows/{WORKFLOW_FILE}/dispatches"
     headers = {
         "Accept": "application/vnd.github+json",
@@ -247,7 +230,6 @@ def ensure_cronjob():
         "Content-Type": "application/json"
     }
     body = {"ref": BRANCH}
-
     job_data = {
         "name": "Host2Play Renewal (470min)",
         "url": trigger_url,
@@ -259,7 +241,6 @@ def ensure_cronjob():
         "interval_unit": "minutes",
         "enabled": True
     }
-
     api_base = "https://cron-job.org/api/v1"
     if CRONJOB_JOB_ID:
         url = f"{api_base}/jobs/{CRONJOB_JOB_ID}"
@@ -269,7 +250,6 @@ def ensure_cronjob():
         url = f"{api_base}/jobs"
         method = "POST"
         print("Creating new cron-job")
-
     auth = {"Authorization": f"Bearer {CRONJOB_API_KEY}"}
     try:
         r = requests.request(method, url, json=job_data, headers=auth, timeout=20)
@@ -280,40 +260,46 @@ def ensure_cronjob():
             if new_id:
                 print(f"Created cron-job with ID {new_id}")
                 print("Please save this ID as CRONJOB_JOB_ID secret.")
-            else:
-                print("Cron-job created, but no ID returned.")
         else:
             print("Cron-job updated successfully.")
     except Exception as e:
         print(f"Failed to manage cron-job: {e}")
 
-# ==================== 主入口 ====================
+# ==================== 主流程 ====================
 def main():
-    try:
-        new_expiry = perform_renewal()
-        print(f"Renewal successful, new expiry: {new_expiry}")
+    print("🚀 Starting Host2Play renewal with SeleniumBase")
+    beijing_time = get_beijing_time()
+    base_msg = (
+        f"🔄 Host2Play 续期\n"
+        f"🕐 北京时间: {beijing_time}\n"
+        f"🔗 {RENEW_URL}"
+    )
 
+    success, new_expiry, error = perform_renewal_with_browser()
+
+    if success and new_expiry:
+        # 写入并提交
         write_expiry(new_expiry)
         commit_expiry_file()
 
+        # 发送成功通知（北京时间）
         beijing_tz = pytz.timezone('Asia/Shanghai')
-        now_beijing = datetime.now(beijing_tz)
         expiry_beijing = new_expiry.astimezone(beijing_tz)
-
         msg = (
-            f"✅ 服务器续期成功\n"
-            f"续期时间：{now_beijing.strftime('%Y-%m-%d %H:%M:%S')} (北京时间)\n"
-            f"新到期时间：{expiry_beijing.strftime('%Y-%m-%d %H:%M:%S')} (北京时间)\n"
-            f"续期链接：{RENEW_URL}"
+            f"✅ 续期成功\n"
+            f"新到期时间: {expiry_beijing.strftime('%Y-%m-%d %H:%M:%S')} (北京时间)\n"
+            f"续期链接: {RENEW_URL}"
         )
         send_tg_message(msg)
+        print(msg)
 
+        # 管理 cron-job
         ensure_cronjob()
-
-    except Exception as e:
-        error_msg = f"❌ 续期失败：{str(e)}\n页面链接：{RENEW_URL}"
-        print(error_msg)
-        send_tg_message(error_msg)
+    else:
+        # 失败通知
+        err_msg = f"❌ 续期失败\n错误信息: {error or '未知错误'}\n续期链接: {RENEW_URL}"
+        send_tg_message(err_msg)
+        print(err_msg)
         sys.exit(1)
 
 if __name__ == "__main__":
