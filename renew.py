@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+Host2Play 自动续期脚本（SeleniumBase + 代理支持）
+- 通过 SOCKS5 代理绕过 Cloudflare
+- 自动点击 Renew server 按钮
+- 解析最新到期时间
+- 发送北京时间 Telegram 通知
+- 管理 cron-job.org 间隔任务（470 分钟）
+- 将到期时间写入 expiry.txt 并提交
+"""
+
 import os
 import sys
 import json
@@ -24,6 +34,7 @@ REPO_OWNER = os.getenv("REPO_OWNER")
 REPO_NAME = os.getenv("REPO_NAME")
 WORKFLOW_FILE = os.getenv("WORKFLOW_FILE", "renew.yml")
 BRANCH = os.getenv("BRANCH", "main")
+PROXY = os.getenv("PROXY")  # 例如 socks5://127.0.0.1:1080
 
 # ==================== 辅助函数 ====================
 def send_tg_message(text):
@@ -52,36 +63,51 @@ def commit_expiry_file():
 def screenshot_step(sb, name):
     ts = int(time.time() * 1000)
     sb.save_screenshot(f"step_{name}_{ts}.png")
+    print(f"📸 Screenshot: step_{name}_{ts}.png")
 
-# ==================== 核心续期（修复返回值 + 通用选择器） ====================
+# ==================== 核心续期 ====================
 def perform_renewal_with_browser():
-    """
-    使用 SeleniumBase 打开页面并尝试续期。
-    返回 (success, expiry_datetime, error_message, server_name)
-    """
     expiry_dt = None
     error_msg = None
     success = False
     server_name = "Unknown"
 
-    with SB(uc=True, headless=True, page_load_strategy='eager') as sb:
+    # 构建 SeleniumBase 参数
+    sb_kwargs = {
+        "uc": True,
+        "headless": True,
+        "page_load_strategy": "eager"
+    }
+    if PROXY:
+        sb_kwargs["proxy"] = PROXY
+        print(f"🔗 使用代理: {PROXY}")
+    else:
+        print("ℹ️ 未使用代理，将直接访问")
+
+    with SB(**sb_kwargs) as sb:
+        # ---------- 打开页面 ----------
         print("🌐 Opening renewal page...")
         sb.open(RENEW_URL)
         sb.wait_for_ready_state_complete()
-        sb.sleep(5)  # 等待 Cloudflare 和动态内容
+        sb.sleep(5)  # 等待 Cloudflare 动态内容
         screenshot_step(sb, "page_loaded")
 
-        # ---- 调试输出页面信息 ----
-        print(f"📄 Page title: {sb.get_title()}")
+        # 检测是否被 Cloudflare 拦截
+        title = sb.get_title()
         page_source = sb.get_page_source()
-        # 截取部分源码以便分析（仅当调试）
-        if len(page_source) > 200:
-            print(f"📄 Source snippet: {page_source[:200]}...")
+        if "524" in title or "cloudflare" in page_source.lower():
+            error_msg = "Cloudflare 拦截或超时，请更换代理"
+            screenshot_step(sb, "blocked")
+            return False, None, error_msg, server_name
 
-        # ---- 获取服务器名称（如果存在） ----
+        print(f"📄 Page title: {title}")
+        # 截取部分源码用于调试（可选）
+        # print(f"📄 Source snippet: {page_source[:200]}...")
+
+        # ---------- 获取服务器名称 ----------
         try:
-            # 尝试多种选择器
-            for sel in ['#serverName', '.server-name', 'h3:contains("Server")', 'div:contains("Server")']:
+            name_selectors = ['#serverName', '.server-name', 'h3:contains("Server")', 'div:contains("Server")']
+            for sel in name_selectors:
                 elem = sb.find_element(sel, timeout=1)
                 if elem:
                     server_name = elem.text.strip()
@@ -89,15 +115,22 @@ def perform_renewal_with_browser():
         except:
             pass
 
-        # ---- 获取当前到期时间 ----
+        # ---------- 获取当前到期时间 ----------
         old_expiry_str = None
         try:
-            # 可能的选择器
-            for sel in ['#expireDate', '.expiry-date', 'span:contains("Expires")', 'div:contains("Expires")']:
+            expiry_selectors = [
+                '#expireDate',
+                '.expiry-date',
+                'span:contains("Expires")',
+                'div:contains("Expires")',
+                'span:contains("Deletes")',
+                'div:contains("Deletes")'
+            ]
+            for sel in expiry_selectors:
                 elem = sb.find_element(sel, timeout=1)
                 if elem:
                     text = elem.text.strip()
-                    # 提取日期
+                    # 提取日期（支持多种格式）
                     match = re.search(r'(\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?)', text)
                     if match:
                         old_expiry_str = match.group(1)
@@ -106,11 +139,11 @@ def perform_renewal_with_browser():
             pass
         print(f"📅 Current expiry (raw): {old_expiry_str}")
 
-        # ---- 点击 Renew server 按钮 ----
+        # ---------- 点击 Renew server 按钮 ----------
         print("🔘 Clicking Renew server button...")
         clicked = False
         try:
-            # 更通用的选择器列表
+            # 多种选择器
             btn_selectors = [
                 'button.btn-primary:contains("Renew")',
                 'button:contains("Renew server")',
@@ -119,7 +152,6 @@ def perform_renewal_with_browser():
                 'a:contains("Renew server")',
                 'button[onclick*="renew()"]',
                 'input[value="Renew"]',
-                # 尝试通过 class 和文本
                 '.btn-primary:contains("Renew")',
                 'button.btn-primary'
             ]
@@ -133,7 +165,7 @@ def perform_renewal_with_browser():
                     continue
 
             if not clicked:
-                # 最后尝试：使用 JavaScript 执行 renew() 函数（如果存在）
+                # 尝试执行 JavaScript 的 renew() 函数
                 try:
                     sb.execute_script("renew();")
                     clicked = True
@@ -142,7 +174,7 @@ def perform_renewal_with_browser():
                     pass
 
             if not clicked:
-                # 尝试查找所有按钮并点击第一个包含 "Renew" 的
+                # 遍历所有按钮，找包含 "renew" 的
                 buttons = sb.find_elements('button')
                 for btn in buttons:
                     if 'renew' in btn.text.lower():
@@ -156,26 +188,24 @@ def perform_renewal_with_browser():
         except Exception as e:
             error_msg = f"Click Renew button failed: {e}"
             screenshot_step(sb, "click_failed")
-            # 统一返回 4 个值
             return False, None, error_msg, server_name
 
         screenshot_step(sb, "after_click")
 
-        # ---- 等待续期完成 ----
+        # ---------- 等待续期完成 ----------
         print("⏳ Waiting for renewal to complete...")
-        time.sleep(10)  # 给足时间
+        time.sleep(10)
 
-        # ---- 刷新页面并获取新的到期时间 ----
+        # ---------- 刷新页面获取新到期时间 ----------
         print("🔄 Refreshing page to get updated expiry...")
         sb.open(RENEW_URL)
         sb.wait_for_ready_state_complete()
         sb.sleep(5)
         screenshot_step(sb, "after_reload")
 
-        # ---- 解析新到期时间 ----
         new_expiry_str = None
         try:
-            for sel in ['#expireDate', '.expiry-date', 'span:contains("Expires")', 'div:contains("Expires")']:
+            for sel in expiry_selectors:
                 elem = sb.find_element(sel, timeout=2)
                 if elem:
                     text = elem.text.strip()
@@ -188,10 +218,9 @@ def perform_renewal_with_browser():
 
         print(f"📅 New expiry (raw): {new_expiry_str}")
 
-        # ---- 判断续期是否成功 ----
+        # ---------- 判断是否成功 ----------
         if new_expiry_str and new_expiry_str != old_expiry_str:
             try:
-                # 尝试多种格式
                 for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
                     try:
                         expiry_dt = datetime.strptime(new_expiry_str, fmt)
@@ -216,7 +245,6 @@ def perform_renewal_with_browser():
         if not success:
             screenshot_step(sb, "renewal_failed")
 
-    # 统一返回 4 个值
     return success, expiry_dt, error_msg, server_name
 
 # ==================== cron-job.org 管理 ====================
@@ -270,8 +298,6 @@ def ensure_cronjob():
 # ==================== 主入口 ====================
 def main():
     print("🚀 Starting Host2Play renewal with SeleniumBase")
-    beijing_time = get_beijing_time()
-
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
