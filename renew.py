@@ -59,15 +59,16 @@ def screenshot_step(sb, name):
     sb.save_screenshot(f"step_{name}_{ts}.png")
     print(f"📸 Screenshot: step_{name}_{ts}.png")
 
-# ==================== 获取出口 IP ====================
-def get_outgoing_ip(sb):
-    """通过浏览器访问 ip.sb 获取当前出口 IP"""
+def get_current_ip(proxy=None):
+    """通过代理获取当前出口 IP"""
+    proxies = None
+    if proxy:
+        proxies = {"http": proxy, "https": proxy}
     try:
-        sb.open("https://api.ip.sb/ip")
-        sb.wait_for_ready_state_complete()
-        time.sleep(2)
-        ip = sb.get_text('body').strip()
-        return ip
+        resp = requests.get("https://api.ip.sb/ip", proxies=proxies, timeout=15)
+        if resp.status_code == 200:
+            return resp.text.strip()
+        return "获取失败"
     except Exception as e:
         return f"获取失败: {e}"
 
@@ -292,11 +293,28 @@ def perform_renewal_with_browser():
     success = False
     server_name = "Unknown"
 
-    # 构建 SeleniumBase 参数
+    # ------ 获取出口 IP ------
+    print("🌍 正在获取当前出口 IP...")
+    proxy_for_ip = PROXY if PROXY else None
+    ip = get_current_ip(proxy_for_ip)
+    print(f"📍 当前出口 IP: {ip}")
+
+    # ------ 构建 SeleniumBase 参数（加强浏览器伪装） ------
     sb_kwargs = {
-        "uc": True,               # 绕过 Cloudflare 基础检测
+        "uc": True,               # 使用 undetected-chromedriver 绕过基础检测
         "headless": True,
-        "page_load_strategy": "eager"
+        "page_load_strategy": "eager",
+        "args": [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-site-isolation-trials",
+            "--window-size=1920,1080",
+            "--disable-web-security",
+        ],
+        "agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     }
     if PROXY:
         sb_kwargs["proxy"] = PROXY
@@ -305,16 +323,8 @@ def perform_renewal_with_browser():
         print("ℹ️ 未使用代理")
 
     with SB(**sb_kwargs) as sb:
-        # ---- 0. 检查出口 IP ----
-        print("🌍 正在获取当前出口 IP...")
-        try:
-            sb.open("https://api.ip.sb/ip")
-            sb.wait_for_ready_state_complete()
-            time.sleep(2)
-            ip = sb.get_text('body').strip()
-            print(f"📍 当前出口 IP: {ip}")
-        except Exception as e:
-            print(f"⚠️ 无法获取出口 IP: {e}")
+        # ---- 额外隐藏 webdriver 属性（加固） ----
+        sb.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         # ---- 1. 加载续期页面，等待 Cloudflare 挑战完成 ----
         print("🌐 Opening renewal page...")
@@ -322,19 +332,22 @@ def perform_renewal_with_browser():
         for attempt in range(max_retries):
             sb.open(RENEW_URL)
             sb.wait_for_ready_state_complete()
-            wait_time = 15 if attempt == 0 else 10
+            wait_time = 20 if attempt == 0 else 15  # 增加等待时间
             print(f"⏳ 等待 {wait_time} 秒（尝试 {attempt+1}/{max_retries}）...")
             sb.sleep(wait_time)
             screenshot_step(sb, f"page_loaded_{attempt+1}")
 
             title = sb.get_title()
             page_source = sb.get_page_source()
+            # 检查 Cloudflare 拦截标志
             if "524" in title or "cloudflare" in page_source.lower():
                 print(f"⚠️ Cloudflare 拦截 (尝试 {attempt+1}/{max_retries})")
                 if attempt < max_retries - 1:
+                    # 刷新并继续
+                    sb.refresh()
                     continue
                 else:
-                    error_msg = "Cloudflare 拦截或超时，请更换代理"
+                    error_msg = "Cloudflare 拦截或超时，请更换代理节点（当前出口IP可能被封锁）"
                     screenshot_step(sb, "blocked")
                     return False, None, error_msg, server_name
             else:
@@ -374,13 +387,13 @@ def perform_renewal_with_browser():
             if recaptcha_checkbox:
                 sb.uc_click('.g-recaptcha')
                 print("✅ Clicked reCAPTCHA checkbox")
-                time.sleep(3)  # 等待验证码加载
+                time.sleep(5)  # 等待验证码加载
         except:
             pass
 
         # 等待验证码图像出现
         print("⏳ 等待 reCAPTCHA 图像加载...")
-        time.sleep(5)
+        time.sleep(8)
 
         # 提取问题代码
         try:
