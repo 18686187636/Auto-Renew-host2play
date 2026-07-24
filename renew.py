@@ -8,8 +8,8 @@ Host2Play 自动续期脚本
 - 访问续期页面，提取 reCAPTCHA sitekey
 - 通过 2captcha 打码获取验证令牌
 - 提交续期请求，解析新的到期时间
-- 通过 Telegram 通知结果（包含续期时间、新到期时间）
-- 管理 cron-job.org 间隔任务（若 Job ID 不存在则自动创建）
+- 通过 Telegram 通知结果（使用北京时间 UTC+8，并附带续期链接）
+- 自动管理 cron-job.org 间隔任务（若 Job ID 不存在则新建）
 - 将到期时间写入 expiry.txt 并提交到仓库
 """
 
@@ -27,12 +27,13 @@ import pytz
 RENEW_URL = "https://host2play.gratis/server/renew?i=d78082ca-90f1-4d7c-afe4-8196a1d6e101"
 EXPIRY_FILE = "expiry.txt"
 
+# 从 GitHub Secrets 注入
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 CRONJOB_API_KEY = os.getenv("CRONJOB_API_KEY")
 CRONJOB_JOB_ID = os.getenv("CRONJOB_JOB_ID")          # 若为空则新建
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")
-GH_TOKEN = os.getenv("GH_TOKEN")                      # 替换为 GH_TOKEN
+GH_TOKEN = os.getenv("GH_TOKEN")                      # GitHub Token（需具备 workflow 权限）
 REPO_OWNER = os.getenv("REPO_OWNER")
 REPO_NAME = os.getenv("REPO_NAME")
 WORKFLOW_FILE = os.getenv("WORKFLOW_FILE", "renew.yml")
@@ -54,7 +55,7 @@ def send_tg_message(text):
 
 # ==================== 到期时间读写与提交 ====================
 def read_expiry():
-    """从文件读取上次记录的到期时间（ISO格式字符串）"""
+    """从文件读取上次记录的到期时间（ISO格式）"""
     if os.path.exists(EXPIRY_FILE):
         with open(EXPIRY_FILE, 'r') as f:
             date_str = f.read().strip()
@@ -68,7 +69,7 @@ def write_expiry(dt):
         f.write(dt.isoformat())
 
 def commit_expiry_file():
-    """提交 expiry.txt 到仓库（使用 [skip ci] 避免触发循环）"""
+    """提交 expiry.txt 到仓库（使用 [skip ci] 避免循环触发）"""
     os.system('git config user.name "github-actions[bot]"')
     os.system('git config user.email "github-actions[bot]@users.noreply.github.com"')
     os.system('git add expiry.txt')
@@ -88,11 +89,9 @@ def get_recaptcha_sitekey(page_url):
             match = re.search(r'sitekey\s*:\s*"([^"]+)"', script.string)
             if match:
                 return match.group(1)
-    # 查找带有 data-sitekey 的元素
     elem = soup.find(attrs={"data-sitekey": True})
     if elem:
         return elem['data-sitekey']
-    # 也许在表单 input 中
     input_tag = soup.find('input', {'name': 'g-recaptcha-response'})
     if input_tag and input_tag.get('data-sitekey'):
         return input_tag['data-sitekey']
@@ -156,11 +155,10 @@ def perform_renewal():
     print("Got captcha token")
 
     # 3. 模拟点击 Renew 按钮
-    # 需根据浏览器实际请求修改以下内容
-    # 假设续期 API 为 POST /server/renew，参数包含 i 和 g-recaptcha-response
-    renew_api = "https://host2play.gratis/server/renew"   # 请确认实际地址
+    # 请根据浏览器开发者工具抓包确认实际的 API 地址和参数
+    renew_api = "https://host2play.gratis/server/renew"   # 示例地址，请核实
     payload = {
-        "i": "d78082ca-90f1-4d7c-afe4-8196a1d6e101",      # 可能参数
+        "i": "d78082ca-90f1-4d7c-afe4-8196a1d6e101",      # 示例参数，请核实
         "g-recaptcha-response": token,
         # 可能还需要 CSRF token 等其他字段，请从页面提取
     }
@@ -174,20 +172,17 @@ def perform_renewal():
         raise Exception(f"Renewal request failed with status {resp.status_code}: {resp.text[:200]}")
 
     # 4. 解析新的到期时间
-    # 假设响应为 JSON 包含 "expiry" 字段
+    # 假设响应为 JSON 包含 "expiry" 字段，若为 HTML 则尝试从页面提取
     try:
         data = resp.json()
         expiry_str = data.get("expiry") or data.get("new_expiry") or data.get("expires")
         if not expiry_str:
             raise Exception("No expiry field in JSON response")
     except json.JSONDecodeError:
-        # 若响应为 HTML，尝试从页面文本提取
         soup = BeautifulSoup(resp.text, 'html.parser')
         text = soup.get_text()
-        # 示例：查找 "Expires on: 2026-07-25" 或类似
         match = re.search(r'Expires? on:?\s*(\d{4}-\d{2}-\d{2})', text, re.IGNORECASE)
         if not match:
-            # 尝试其他常见格式
             match = re.search(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', text)
         if match:
             expiry_str = match.group(1)
@@ -198,7 +193,6 @@ def perform_renewal():
     try:
         new_expiry = datetime.fromisoformat(expiry_str)
     except ValueError:
-        # 尝试其他格式
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
             try:
                 new_expiry = datetime.strptime(expiry_str, fmt)
@@ -219,6 +213,7 @@ def ensure_cronjob():
     """
     创建或更新 cron-job.org 任务，使其每隔 470 分钟触发一次当前工作流。
     若 CRONJOB_JOB_ID 存在则更新，否则新建。
+    使用符合 GitHub API 规范的请求头和正文。
     """
     if not CRONJOB_API_KEY:
         print("CRONJOB_API_KEY missing, skip cronjob setup.")
@@ -229,9 +224,12 @@ def ensure_cronjob():
 
     # GitHub Actions workflow_dispatch 触发 URL
     trigger_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/workflows/{WORKFLOW_FILE}/dispatches"
+    # 必须包含的请求头（根据 GitHub API 要求）
     headers = {
+        "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {GH_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type": "application/json"
     }
     body = {"ref": BRANCH}
 
@@ -241,7 +239,7 @@ def ensure_cronjob():
         "url": trigger_url,
         "request_method": "POST",
         "request_headers": headers,
-        "request_body": json.dumps(body),
+        "request_body": json.dumps(body),   # 必须是 JSON 字符串
         "type": "interval",
         "interval_value": 470,
         "interval_unit": "minutes",
@@ -278,7 +276,6 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    """脚本主逻辑：执行续期、通知、更新 cron-job"""
     try:
         new_expiry = perform_renewal()
         print(f"Renewal successful, new expiry: {new_expiry}")
@@ -287,12 +284,16 @@ def main():
         write_expiry(new_expiry)
         commit_expiry_file()
 
-        # 发送成功通知
-        now_utc = datetime.now(pytz.UTC)
+        # ---------- 使用北京时间（UTC+8）发送通知 ----------
+        beijing_tz = pytz.timezone('Asia/Shanghai')
+        now_beijing = datetime.now(beijing_tz)
+        expiry_beijing = new_expiry.astimezone(beijing_tz)
+
         msg = (
-            f"✅ Server Renewal Successful\n"
-            f"Renewed at: {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-            f"New expiry: {new_expiry.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+            f"✅ 服务器续期成功\n"
+            f"续期时间：{now_beijing.strftime('%Y-%m-%d %H:%M:%S')} (北京时间)\n"
+            f"新到期时间：{expiry_beijing.strftime('%Y-%m-%d %H:%M:%S')} (北京时间)\n"
+            f"续期链接：{RENEW_URL}"
         )
         send_tg_message(msg)
 
@@ -300,7 +301,7 @@ def main():
         ensure_cronjob()
 
     except Exception as e:
-        error_msg = f"❌ Renewal Failed: {str(e)}"
+        error_msg = f"❌ 续期失败：{str(e)}\n页面链接：{RENEW_URL}"
         print(error_msg)
         send_tg_message(error_msg)
         sys.exit(1)
