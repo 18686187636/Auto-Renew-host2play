@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
-Host2Play 自动续期脚本（每7小时50分触发）
+Host2Play 自动续期脚本
+触发频率：每 470 分钟（7小时50分）由 cron-job.org 调用
 功能：
 - 访问续期页面，提取 reCAPTCHA sitekey
 - 通过 2captcha 打码获取验证令牌
 - 提交续期请求，解析新的到期时间
-- 通过 Telegram 通知结果
-- 管理 cron-job.org 间隔任务（470 分钟）
+- 通过 Telegram 通知结果（包含续期时间、新到期时间）
+- 管理 cron-job.org 间隔任务（若 Job ID 不存在则自动创建）
 - 将到期时间写入 expiry.txt 并提交到仓库
 """
 
@@ -20,23 +23,22 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 import pytz
 
-# ---------- 配置 ----------
+# ==================== 配置（从环境变量读取） ====================
 RENEW_URL = "https://host2play.gratis/server/renew?i=d78082ca-90f1-4d7c-afe4-8196a1d6e101"
 EXPIRY_FILE = "expiry.txt"
 
-# 从环境变量读取 Secrets
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 CRONJOB_API_KEY = os.getenv("CRONJOB_API_KEY")
 CRONJOB_JOB_ID = os.getenv("CRONJOB_JOB_ID")          # 若为空则新建
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GH_TOKEN = os.getenv("GH_TOKEN")                      # 替换为 GH_TOKEN
 REPO_OWNER = os.getenv("REPO_OWNER")
 REPO_NAME = os.getenv("REPO_NAME")
 WORKFLOW_FILE = os.getenv("WORKFLOW_FILE", "renew.yml")
 BRANCH = os.getenv("BRANCH", "main")
 
-# ---------- Telegram 通知 ----------
+# ==================== Telegram 通知 ====================
 def send_tg_message(text):
     """发送 Telegram 消息"""
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
@@ -50,7 +52,7 @@ def send_tg_message(text):
     except Exception as e:
         print(f"Failed to send TG message: {e}")
 
-# ---------- 到期时间读写与提交 ----------
+# ==================== 到期时间读写与提交 ====================
 def read_expiry():
     """从文件读取上次记录的到期时间（ISO格式字符串）"""
     if os.path.exists(EXPIRY_FILE):
@@ -73,7 +75,7 @@ def commit_expiry_file():
     os.system('git commit -m "Update expiry date [skip ci]" || echo "No changes to commit"')
     os.system('git push')
 
-# ---------- reCAPTCHA 处理 ----------
+# ==================== reCAPTCHA 处理 ====================
 def get_recaptcha_sitekey(page_url):
     """从续期页面提取 reCAPTCHA sitekey"""
     resp = requests.get(page_url, timeout=15)
@@ -139,7 +141,7 @@ def solve_captcha_with_2captcha(sitekey, page_url):
         raise Exception(f"2captcha error: {data}")
     raise Exception("2captcha polling timeout")
 
-# ---------- 续期核心操作 ----------
+# ==================== 续期核心操作 ====================
 def perform_renewal():
     """
     执行续期流程，返回新的到期时间（datetime 对象）
@@ -181,8 +183,8 @@ def perform_renewal():
     except json.JSONDecodeError:
         # 若响应为 HTML，尝试从页面文本提取
         soup = BeautifulSoup(resp.text, 'html.parser')
-        # 示例：查找 "Expires on: 2026-07-25" 或类似
         text = soup.get_text()
+        # 示例：查找 "Expires on: 2026-07-25" 或类似
         match = re.search(r'Expires? on:?\s*(\d{4}-\d{2}-\d{2})', text, re.IGNORECASE)
         if not match:
             # 尝试其他常见格式
@@ -192,7 +194,7 @@ def perform_renewal():
         else:
             raise Exception("Could not parse expiry date from response")
 
-    # 解析为 datetime，假设时区为 UTC（若有时区信息可调整）
+    # 解析为 datetime，支持多种格式
     try:
         new_expiry = datetime.fromisoformat(expiry_str)
     except ValueError:
@@ -212,7 +214,7 @@ def perform_renewal():
 
     return new_expiry
 
-# ---------- cron-job.org 管理 ----------
+# ==================== cron-job.org 管理 ====================
 def ensure_cronjob():
     """
     创建或更新 cron-job.org 任务，使其每隔 470 分钟触发一次当前工作流。
@@ -221,11 +223,14 @@ def ensure_cronjob():
     if not CRONJOB_API_KEY:
         print("CRONJOB_API_KEY missing, skip cronjob setup.")
         return
+    if not GH_TOKEN:
+        print("GH_TOKEN missing, cannot set up cron-job trigger.")
+        return
 
     # GitHub Actions workflow_dispatch 触发 URL
     trigger_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/workflows/{WORKFLOW_FILE}/dispatches"
     headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Authorization": f"Bearer {GH_TOKEN}",
         "Accept": "application/vnd.github.v3+json"
     }
     body = {"ref": BRANCH}
@@ -271,9 +276,9 @@ def ensure_cronjob():
         print(f"Failed to manage cron-job: {e}")
         # 不抛出异常，以免影响续期主流程
 
-# ---------- 主入口 ----------
+# ==================== 主入口 ====================
 def main():
-    # 每次运行都执行续期（无需判断阈值）
+    """脚本主逻辑：执行续期、通知、更新 cron-job"""
     try:
         new_expiry = perform_renewal()
         print(f"Renewal successful, new expiry: {new_expiry}")
