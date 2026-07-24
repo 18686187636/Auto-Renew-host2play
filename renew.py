@@ -1,27 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Host2Play 自动续期脚本（SeleniumBase + 代理支持）
-- 通过 SOCKS5 代理绕过 Cloudflare
-- 自动点击 Renew server 按钮
-- 解析最新到期时间
-- 发送北京时间 Telegram 通知
-- 管理 cron-job.org 间隔任务（470 分钟）
-- 将到期时间写入 expiry.txt 并提交
-"""
-
 import os
 import sys
 import json
 import time
 import re
+import base64
+import io
 import requests
 from datetime import datetime
 import pytz
+from PIL import Image
 from seleniumbase import SB
 
-# ==================== 配置 ====================
+# ==================== 环境变量 ====================
 RENEW_URL = "https://host2play.gratis/server/renew?i=d78082ca-90f1-4d7c-afe4-8196a1d6e101"
 EXPIRY_FILE = "expiry.txt"
 
@@ -34,7 +27,8 @@ REPO_OWNER = os.getenv("REPO_OWNER")
 REPO_NAME = os.getenv("REPO_NAME")
 WORKFLOW_FILE = os.getenv("WORKFLOW_FILE", "renew.yml")
 BRANCH = os.getenv("BRANCH", "main")
-PROXY = os.getenv("PROXY")  # 例如 socks5://127.0.0.1:1080
+PROXY = os.getenv("PROXY")                          # socks5://127.0.0.1:1080
+CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")      # Ace Data Cloud Token
 
 # ==================== 辅助函数 ====================
 def send_tg_message(text):
@@ -65,7 +59,224 @@ def screenshot_step(sb, name):
     sb.save_screenshot(f"step_{name}_{ts}.png")
     print(f"📸 Screenshot: step_{name}_{ts}.png")
 
-# ==================== 核心续期 ====================
+# ==================== Ace Data Cloud 打码集成 ====================
+CAPTCHA_API_URL = "https://api.adedata.cloud/captcha/recognition/recaptcha2"
+
+def solve_recaptcha_via_acedata(image_data, question_code):
+    """
+    调用 Ace Data Cloud API 识别 reCAPTCHA v2 图像
+    参数：
+        image_data: PIL.Image 对象（已缩放至标准尺寸）
+        question_code: 问题代码，如 "/m/01pns0"（消防栓）
+    返回：需要点击的网格索引列表（0-based）
+    """
+    if not CAPTCHA_API_KEY:
+        raise Exception("CAPTCHA_API_KEY not set")
+
+    # 将图像转为 Base64
+    buffered = io.BytesIO()
+    image_data.save(buffered, format="PNG")
+    img_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+    headers = {
+        "accept": "application/json",
+        "authorization": f"Bearer {CAPTCHA_API_KEY}",
+        "content-type": "application/json"
+    }
+    payload = {
+        "question": question_code,
+        "image": img_base64
+    }
+
+    resp = requests.post(CAPTCHA_API_URL, json=payload, headers=headers, timeout=60)
+    if resp.status_code != 200:
+        raise Exception(f"API request failed: {resp.status_code} - {resp.text}")
+
+    result = resp.json()
+    if not result.get("success"):
+        error = result.get("error", {})
+        raise Exception(f"API error: {error.get('code')} - {error.get('message')}")
+
+    solution = result.get("solution", {})
+    objects = solution.get("objects", [])
+    if not objects:
+        raise Exception("No objects to click returned by API")
+
+    return objects, solution.get("size", 300)
+
+def click_recaptcha_grid(sb, objects, grid_size=300):
+    """
+    在浏览器中模拟点击 reCAPTCHA 网格中的指定索引
+    假设网格为 3x3 或 4x4，根据 grid_size 推断
+    """
+    # 定位 reCAPTCHA 图像元素（通常为 iframe 内的图片）
+    # 首先切换到 reCAPTCHA 的 iframe
+    try:
+        # 尝试查找包含 reCAPTCHA 的 iframe
+        iframes = sb.find_elements('iframe[src*="recaptcha"]')
+        for iframe in iframes:
+            sb.switch_to_frame(iframe)
+            break
+        else:
+            raise Exception("No reCAPTCHA iframe found")
+    except Exception as e:
+        raise Exception(f"Failed to switch to reCAPTCHA iframe: {e}")
+
+    # 查找验证码图像（通常是 img 或 canvas）
+    img_elem = None
+    try:
+        img_elem = sb.find_element('img', timeout=3)
+    except:
+        try:
+            img_elem = sb.find_element('canvas', timeout=3)
+        except:
+            pass
+    if not img_elem:
+        raise Exception("Could not find reCAPTCHA image element")
+
+    # 获取图像位置和尺寸
+    location = img_elem.location
+    size = img_elem.size
+    left = location['x']
+    top = location['y']
+    width = size['width']
+    height = size['height']
+
+    # 计算网格行列数（假设 grid_size 是原始图像尺寸，如 300）
+    # 通常 reCAPTCHA 是 3x3 网格，但也可以根据实际大小估算
+    # 这里简单假设 3x3
+    cols = 3
+    rows = 3
+    cell_w = width / cols
+    cell_h = height / rows
+
+    # 点击每个索引对应的格子中心
+    actions = sb.driver.action_chains
+    for idx in objects:
+        row = idx // cols
+        col = idx % cols
+        x = left + col * cell_w + cell_w / 2
+        y = top + row * cell_h + cell_h / 2
+        print(f"🔘 Clicking index {idx} at ({x:.0f}, {y:.0f})")
+        actions.move_by_offset(x, y).click().perform()
+        time.sleep(0.5)
+
+    # 切回默认内容
+    sb.switch_to_default_content()
+
+def extract_question_from_page(sb):
+    """
+    从页面提取 reCAPTCHA 问题文本，并映射为代码
+    这里简化：根据常见问题中文文本匹配
+    """
+    # 尝试在页面中查找问题文本
+    question_text = None
+    # 常见选择器：.rc-imageselect-instructions
+    try:
+        elem = sb.find_element('.rc-imageselect-instructions', timeout=3)
+        if elem:
+            question_text = elem.text.strip()
+    except:
+        pass
+
+    if not question_text:
+        # 尝试在 iframe 中查找
+        try:
+            iframes = sb.find_elements('iframe[src*="recaptcha"]')
+            for iframe in iframes:
+                sb.switch_to_frame(iframe)
+                try:
+                    elem = sb.find_element('.rc-imageselect-instructions', timeout=2)
+                    if elem:
+                        question_text = elem.text.strip()
+                        break
+                except:
+                    continue
+            sb.switch_to_default_content()
+        except:
+            pass
+
+    if not question_text:
+        raise Exception("Could not find reCAPTCHA question text")
+
+    # 映射中文问题到代码（根据官方文档）
+    question_map = {
+        "出租车": "/m/0pg52",
+        "巴士": "/m/01bjv",
+        "校车": "/m/02yvhj",
+        "摩托车": "/m/04_sv",
+        "拖拉机": "/m/013xlm",
+        "烟囱": "/m/01jk_4",
+        "人行横道": "/m/014xcs",
+        "红绿灯": "/m/015qff",
+        "自行车": "/m/0199g",
+        "停车计价表": "/m/015qbp",
+        "汽车": "/m/0k4j",
+        "桥": "/m/015kr",
+        "船": "/m/019jd",
+        "棕榈树": "/m/0cdl1",
+        "山": "/m/09d_r",
+        "消防栓": "/m/01pns0",
+        "楼梯": "/m/01lynh"
+    }
+    # 尝试精确匹配
+    for cn, code in question_map.items():
+        if cn in question_text:
+            return code
+    # 如果未匹配，默认尝试查找包含 "/m/" 的内容
+    match = re.search(r'/m/[a-z0-9]+', question_text)
+    if match:
+        return match.group(0)
+    raise Exception(f"Unrecognized question: {question_text}")
+
+def capture_recaptcha_image(sb):
+    """
+    截取当前页面中的 reCAPTCHA 验证码图像（已缩放至 300x300）
+    返回 PIL.Image 对象
+    """
+    # 确保在 reCAPTCHA iframe 内
+    try:
+        iframes = sb.find_elements('iframe[src*="recaptcha"]')
+        for iframe in iframes:
+            sb.switch_to_frame(iframe)
+            break
+        else:
+            raise Exception("No reCAPTCHA iframe found")
+    except Exception as e:
+        raise Exception(f"Failed to switch to reCAPTCHA iframe: {e}")
+
+    # 查找图像元素
+    img_elem = None
+    try:
+        img_elem = sb.find_element('img', timeout=3)
+    except:
+        try:
+            img_elem = sb.find_element('canvas', timeout=3)
+        except:
+            pass
+    if not img_elem:
+        raise Exception("Could not find reCAPTCHA image element")
+
+    # 截图并裁剪
+    # 使用 SeleniumBase 的截图方法无法直接截取元素，我们获取其位置和大小，然后整体截图裁剪
+    location = img_elem.location
+    size = img_elem.size
+    left = location['x']
+    top = location['y']
+    width = size['width']
+    height = size['height']
+
+    # 截取整个页面（或视口）
+    png_data = sb.driver.get_screenshot_as_png()
+    img = Image.open(io.BytesIO(png_data))
+    # 裁剪
+    cropped = img.crop((left, top, left + width, top + height))
+    # 缩放至 300x300（API 要求）
+    resized = cropped.resize((300, 300), Image.LANCZOS)
+    sb.switch_to_default_content()
+    return resized
+
+# ==================== 核心续期流程 ====================
 def perform_renewal_with_browser():
     expiry_dt = None
     error_msg = None
@@ -74,138 +285,164 @@ def perform_renewal_with_browser():
 
     # 构建 SeleniumBase 参数
     sb_kwargs = {
-        "uc": True,
+        "uc": True,               # 绕过 Cloudflare 基础检测
         "headless": True,
         "page_load_strategy": "eager"
     }
     if PROXY:
-        sb_kwargs["proxy"] = PROXY
+        sb_kwargs["driver_args"] = [f'--proxy-server={PROXY}']
         print(f"🔗 使用代理: {PROXY}")
     else:
-        print("ℹ️ 未使用代理，将直接访问")
+        print("ℹ️ 未使用代理")
 
     with SB(**sb_kwargs) as sb:
-        # ---------- 打开页面 ----------
+        # ---- 1. 加载续期页面，等待 Cloudflare 挑战完成 ----
         print("🌐 Opening renewal page...")
-        sb.open(RENEW_URL)
-        sb.wait_for_ready_state_complete()
-        sb.sleep(5)  # 等待 Cloudflare 动态内容
-        screenshot_step(sb, "page_loaded")
+        max_retries = 3
+        for attempt in range(max_retries):
+            sb.open(RENEW_URL)
+            sb.wait_for_ready_state_complete()
+            wait_time = 15 if attempt == 0 else 10
+            print(f"⏳ 等待 {wait_time} 秒（尝试 {attempt+1}/{max_retries}）...")
+            sb.sleep(wait_time)
+            screenshot_step(sb, f"page_loaded_{attempt+1}")
 
-        # 检测是否被 Cloudflare 拦截
-        title = sb.get_title()
-        page_source = sb.get_page_source()
-        if "524" in title or "cloudflare" in page_source.lower():
-            error_msg = "Cloudflare 拦截或超时，请更换代理"
-            screenshot_step(sb, "blocked")
+            title = sb.get_title()
+            page_source = sb.get_page_source()
+            if "524" in title or "cloudflare" in page_source.lower():
+                print(f"⚠️ Cloudflare 拦截 (尝试 {attempt+1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    continue
+                else:
+                    error_msg = "Cloudflare 拦截或超时，请更换代理"
+                    screenshot_step(sb, "blocked")
+                    return False, None, error_msg, server_name
+            else:
+                print("✅ 页面正常加载")
+                break
+        else:
+            error_msg = "页面加载失败"
             return False, None, error_msg, server_name
 
-        print(f"📄 Page title: {title}")
-        # 截取部分源码用于调试（可选）
-        # print(f"📄 Source snippet: {page_source[:200]}...")
-
-        # ---------- 获取服务器名称 ----------
+        # ---- 2. 获取服务器名称和当前到期时间 ----
         try:
-            name_selectors = ['#serverName', '.server-name', 'h3:contains("Server")', 'div:contains("Server")']
-            for sel in name_selectors:
-                elem = sb.find_element(sel, timeout=1)
-                if elem:
-                    server_name = elem.text.strip()
-                    break
+            name_elem = sb.find_element('#serverName', timeout=2)
+            if name_elem:
+                server_name = name_elem.text.strip()
         except:
             pass
 
-        # ---------- 获取当前到期时间 ----------
         old_expiry_str = None
-        try:
-            expiry_selectors = [
-                '#expireDate',
-                '.expiry-date',
-                'span:contains("Expires")',
-                'div:contains("Expires")',
-                'span:contains("Deletes")',
-                'div:contains("Deletes")'
-            ]
-            for sel in expiry_selectors:
+        expiry_selectors = ['#expireDate', '.expiry-date', 'span:contains("Expires")', 'div:contains("Expires")']
+        for sel in expiry_selectors:
+            try:
                 elem = sb.find_element(sel, timeout=1)
                 if elem:
                     text = elem.text.strip()
-                    # 提取日期（支持多种格式）
                     match = re.search(r'(\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?)', text)
                     if match:
                         old_expiry_str = match.group(1)
                         break
-        except:
-            pass
+            except:
+                continue
         print(f"📅 Current expiry (raw): {old_expiry_str}")
 
-        # ---------- 点击 Renew server 按钮 ----------
+        # ---- 3. 触发 reCAPTCHA 并获取验证码 ----
+        # 如果页面有 reCAPTCHA 复选框，先点击它
+        try:
+            recaptcha_checkbox = sb.find_element('.g-recaptcha', timeout=5)
+            if recaptcha_checkbox:
+                sb.uc_click('.g-recaptcha')
+                print("✅ Clicked reCAPTCHA checkbox")
+                time.sleep(3)  # 等待验证码加载
+        except:
+            pass
+
+        # 等待验证码图像出现
+        print("⏳ 等待 reCAPTCHA 图像加载...")
+        time.sleep(5)
+
+        # 提取问题代码
+        try:
+            question_code = extract_question_from_page(sb)
+            print(f"🧩 Question code: {question_code}")
+        except Exception as e:
+            error_msg = f"Failed to extract question: {e}"
+            screenshot_step(sb, "question_failed")
+            return False, None, error_msg, server_name
+
+        # 截取验证码图像
+        try:
+            captcha_img = capture_recaptcha_image(sb)
+            print("📸 reCAPTCHA image captured and resized to 300x300")
+        except Exception as e:
+            error_msg = f"Failed to capture reCAPTCHA image: {e}"
+            screenshot_step(sb, "capture_failed")
+            return False, None, error_msg, server_name
+
+        # ---- 4. 调用 Ace Data Cloud 识别 ----
+        try:
+            objects, grid_size = solve_recaptcha_via_acedata(captcha_img, question_code)
+            print(f"🧩 Objects to click: {objects}")
+        except Exception as e:
+            error_msg = f"Ace Data Cloud error: {e}"
+            screenshot_step(sb, "api_failed")
+            return False, None, error_msg, server_name
+
+        # ---- 5. 模拟点击网格 ----
+        try:
+            click_recaptcha_grid(sb, objects, grid_size)
+            print("✅ reCAPTCHA grid clicked")
+            time.sleep(2)
+        except Exception as e:
+            error_msg = f"Failed to click grid: {e}"
+            screenshot_step(sb, "click_grid_failed")
+            return False, None, error_msg, server_name
+
+        # ---- 6. 点击续期按钮 ----
         print("🔘 Clicking Renew server button...")
         clicked = False
-        try:
-            # 多种选择器
-            btn_selectors = [
-                'button.btn-primary:contains("Renew")',
-                'button:contains("Renew server")',
-                'button:contains("Renew")',
-                'a.btn-primary:contains("Renew")',
-                'a:contains("Renew server")',
-                'button[onclick*="renew()"]',
-                'input[value="Renew"]',
-                '.btn-primary:contains("Renew")',
-                'button.btn-primary'
-            ]
-            for sel in btn_selectors:
-                try:
-                    sb.uc_click(sel, timeout=3)
-                    clicked = True
-                    print(f"✅ Clicked using selector: {sel}")
-                    break
-                except:
-                    continue
-
-            if not clicked:
-                # 尝试执行 JavaScript 的 renew() 函数
-                try:
-                    sb.execute_script("renew();")
-                    clicked = True
-                    print("✅ Clicked via JavaScript renew()")
-                except:
-                    pass
-
-            if not clicked:
-                # 遍历所有按钮，找包含 "renew" 的
-                buttons = sb.find_elements('button')
-                for btn in buttons:
-                    if 'renew' in btn.text.lower():
-                        sb.driver.execute_script("arguments[0].click();", btn)
-                        clicked = True
-                        print("✅ Clicked via JavaScript on button with text containing 'renew'")
-                        break
-
-            if not clicked:
-                raise Exception("Could not find any clickable Renew button")
-        except Exception as e:
-            error_msg = f"Click Renew button failed: {e}"
+        btn_selectors = [
+            'button.btn-primary:contains("Renew")',
+            'button:contains("Renew server")',
+            'button:contains("Renew")',
+            'button[onclick*="renew()"]',
+            '.btn-primary:contains("Renew")'
+        ]
+        for sel in btn_selectors:
+            try:
+                sb.uc_click(sel, timeout=3)
+                clicked = True
+                print(f"✅ Clicked using selector: {sel}")
+                break
+            except:
+                continue
+        if not clicked:
+            try:
+                sb.execute_script("renew();")
+                clicked = True
+                print("✅ Clicked via JavaScript renew()")
+            except:
+                pass
+        if not clicked:
+            error_msg = "Could not click Renew button"
             screenshot_step(sb, "click_failed")
             return False, None, error_msg, server_name
 
         screenshot_step(sb, "after_click")
-
-        # ---------- 等待续期完成 ----------
-        print("⏳ Waiting for renewal to complete...")
+        print("⏳ 等待续期完成...")
         time.sleep(10)
 
-        # ---------- 刷新页面获取新到期时间 ----------
-        print("🔄 Refreshing page to get updated expiry...")
+        # ---- 7. 刷新页面获取新到期时间 ----
+        print("🔄 Refreshing page...")
         sb.open(RENEW_URL)
         sb.wait_for_ready_state_complete()
         sb.sleep(5)
         screenshot_step(sb, "after_reload")
 
         new_expiry_str = None
-        try:
-            for sel in expiry_selectors:
+        for sel in expiry_selectors:
+            try:
                 elem = sb.find_element(sel, timeout=2)
                 if elem:
                     text = elem.text.strip()
@@ -213,12 +450,11 @@ def perform_renewal_with_browser():
                     if match:
                         new_expiry_str = match.group(1)
                         break
-        except:
-            pass
-
+            except:
+                continue
         print(f"📅 New expiry (raw): {new_expiry_str}")
 
-        # ---------- 判断是否成功 ----------
+        # ---- 8. 判断结果 ----
         if new_expiry_str and new_expiry_str != old_expiry_str:
             try:
                 for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
@@ -247,7 +483,7 @@ def perform_renewal_with_browser():
 
     return success, expiry_dt, error_msg, server_name
 
-# ==================== cron-job.org 管理 ====================
+# ==================== cron-job.org 调度 ====================
 def ensure_cronjob():
     if not CRONJOB_API_KEY or not GH_TOKEN:
         print("Missing CRONJOB_API_KEY or GH_TOKEN, skip cronjob setup.")
@@ -297,7 +533,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal with SeleniumBase")
+    print("🚀 Starting Host2Play renewal with Ace Data Cloud reCAPTCHA solver")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
