@@ -60,7 +60,7 @@ def screenshot_step(sb, name):
     print(f"📸 Screenshot: step_{name}_{ts}.png")
 
 # ==================== Ace Data Cloud 打码集成 ====================
-CAPTCHA_API_URL = "https://api.adedata.cloud/captcha/recognition/recaptcha2"
+CAPTCHA_API_URL = "https://api.acedata.cloud/captcha/recognition/recaptcha2"
 
 def solve_recaptcha_via_acedata(image_data, question_code):
     """
@@ -142,9 +142,7 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
     width = size['width']
     height = size['height']
 
-    # 计算网格行列数（假设 grid_size 是原始图像尺寸，如 300）
-    # 通常 reCAPTCHA 是 3x3 网格，但也可以根据实际大小估算
-    # 这里简单假设 3x3
+    # 计算网格行列数（假设 3x3）
     cols = 3
     rows = 3
     cell_w = width / cols
@@ -258,7 +256,6 @@ def capture_recaptcha_image(sb):
         raise Exception("Could not find reCAPTCHA image element")
 
     # 截图并裁剪
-    # 使用 SeleniumBase 的截图方法无法直接截取元素，我们获取其位置和大小，然后整体截图裁剪
     location = img_elem.location
     size = img_elem.size
     left = location['x']
@@ -290,7 +287,7 @@ def perform_renewal_with_browser():
         "page_load_strategy": "eager"
     }
     if PROXY:
-        sb_kwargs["driver_args"] = [f'--proxy-server={PROXY}']
+        sb_kwargs["proxy"] = PROXY
         print(f"🔗 使用代理: {PROXY}")
     else:
         print("ℹ️ 未使用代理")
