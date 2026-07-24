@@ -241,21 +241,11 @@ def perform_renewal_with_browser():
     ip = get_current_ip(proxy_for_ip)
     print(f"📍 当前出口 IP: {ip}")
 
-    # 构建 SeleniumBase 参数（使用 chrome_args 和 user_agent）
+    # 构建 SeleniumBase 参数（仅支持标准参数）
     sb_kwargs = {
-        "uc": True,
+        "uc": True,                  # 使用 undetected-chromedriver
         "headless": True,
         "page_load_strategy": "eager",
-        "chrome_args": [
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--disable-features=IsolateOrigins,site-per-process",
-            "--disable-site-isolation-trials",
-            "--window-size=1920,1080",
-            "--disable-web-security",
-        ],
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     }
     if PROXY:
@@ -265,8 +255,25 @@ def perform_renewal_with_browser():
         print("ℹ️ 未使用代理")
 
     with SB(**sb_kwargs) as sb:
-        # ---- 额外隐藏 webdriver 属性 ----
-        sb.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        # ---- 使用 CDP 注入反检测脚本（在导航之前） ----
+        try:
+            sb.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                "source": """
+                    // 隐藏 webdriver 特征
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    // 伪造 plugins
+                    Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                    // 伪造 languages
+                    Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh']});
+                    // 伪造 chrome 对象
+                    window.chrome = { runtime: {} };
+                    // 伪造 permissions
+                    window.navigator.permissions = { query: () => Promise.resolve({ state: 'prompt' }) };
+                """
+            })
+            print("✅ 反检测脚本已注入")
+        except Exception as e:
+            print(f"⚠️ CDP 注入失败（继续尝试）: {e}")
 
         print("🌐 Opening renewal page...")
         max_retries = 3
