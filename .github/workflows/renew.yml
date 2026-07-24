@@ -1,0 +1,31 @@
+name: Auto Renew Server
+
+on:
+  workflow_dispatch:          # 手动触发，也作为 cron-job 的调用目标
+
+permissions:
+  contents: write             # 提交 expiry.txt
+  actions: write              # 触发自身工作流（如需）
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: pip install -r requirements.txt
+      - name: Run renewal
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          CRONJOB_API_KEY: ${{ secrets.CRONJOB_API_KEY }}
+          CRONJOB_JOB_ID: ${{ secrets.CRONJOB_JOB_ID }}   # 可选，已存在则更新
+          CAPTCHA_API_KEY: ${{ secrets.CAPTCHA_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          WORKFLOW_FILE: 'renew.yml'
+          BRANCH: ${{ github.ref_name }}
+        run: python renew.py
