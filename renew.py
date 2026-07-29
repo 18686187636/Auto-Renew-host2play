@@ -15,7 +15,7 @@ from PIL import Image
 from seleniumbase import SB
 
 # ==================== 环境变量 ====================
-RENEW_URL = "https://host2play.gratis/server/renew?i=459cc4c7-29c8-4fb9-90ca-7860eaeea74d"
+RENEW_URL = "https://host2play.gratis/server/renew?i=51b0dc2e-b901-46bf-b47a-20f5e6051459"
 EXPIRY_FILE = "expiry.txt"
 
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
