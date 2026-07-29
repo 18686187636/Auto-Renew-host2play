@@ -209,12 +209,10 @@ def perform_renewal_with_browser():
                 pass
             return False
 
-        # ========== 2. 动态获取 sitekey ==========
+        # ========== 2. 获取 sitekey ==========
         sitekey = sb.execute_script("""
-            // 从 .g-recaptcha 的 data-sitekey 获取
             var elem = document.querySelector('.g-recaptcha');
             if (elem) return elem.getAttribute('data-sitekey');
-            // 尝试从页面脚本中提取
             var scripts = document.getElementsByTagName('script');
             for (var i=0; i<scripts.length; i++) {
                 var src = scripts[i].src || '';
@@ -222,7 +220,6 @@ def perform_renewal_with_browser():
                     var match = src.match(/render=([^&]+)/);
                     if (match) return match[1];
                 }
-                // 尝试从 innerHTML 中提取
                 var html = scripts[i].innerHTML || '';
                 var m = html.match(/sitekey['"]?\\s*[:=]\\s*['"]([^'"]+)['"]/);
                 if (m) return m[1];
@@ -230,12 +227,12 @@ def perform_renewal_with_browser():
             return null;
         """)
         if not sitekey:
-            error_msg = "无法获取 sitekey，请检查页面是否包含 reCAPTCHA"
+            error_msg = "无法获取 sitekey"
             screenshot_step(sb, "sitekey_failed")
             return False, None, error_msg, server_name
         print(f"🔑 获取到 sitekey: {sitekey}")
 
-        # ========== 3. 第一次点击 Renew（触发验证） ==========
+        # ========== 3. 第一次点击 Renew（触发 reCAPTCHA） ==========
         print("🔘 第一次点击 Renew server 按钮...")
         if not click_renew():
             error_msg = "无法点击 Renew 按钮"
@@ -243,7 +240,22 @@ def perform_renewal_with_browser():
             return False, None, error_msg, server_name
         time.sleep(3)
 
-        # ========== 4. 获取 reCAPTCHA token（通过 Token API） ==========
+        # ========== 4. 手动勾选 reCAPTCHA 复选框 ==========
+        print("🔘 正在手动勾选 reCAPTCHA 复选框...")
+        try:
+            sb.wait_for_element('iframe[src*="recaptcha"]', timeout=10)
+            sb.switch_to_frame('iframe[src*="recaptcha"]')
+            sb.wait_for_element('#recaptcha-anchor', timeout=5)
+            sb.click('#recaptcha-anchor')
+            print("✅ 已勾选 I'm not a robot 复选框")
+            sb.switch_to_default_content()
+            time.sleep(3)
+        except Exception as e:
+            print(f"⚠️ 手动勾选复选框失败: {e}")
+            sb.switch_to_default_content()
+            # 如果失败，继续尝试，可能验证已自动通过
+
+        # ========== 5. 获取 reCAPTCHA token（通过 Token API） ==========
         print("🔄 正在请求 reCAPTCHA token...")
         try:
             token = get_recaptcha_token(sitekey, RENEW_URL, PROXY)
@@ -253,7 +265,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "token_failed")
             return False, None, error_msg, server_name
 
-        # ========== 5. 注入 token 并触发验证 ==========
+        # ========== 6. 注入 token 并触发验证完成 ==========
         print("💉 注入 token...")
         inject_script = f"""
             (function() {{
@@ -265,7 +277,7 @@ def perform_renewal_with_browser():
                     textarea.dispatchEvent(new Event('change', {{ bubbles: true }}));
                 }}
 
-                // 2. 触发回调（如果有）
+                // 2. 触发回调
                 if (typeof verifyCallback === 'function') {{
                     verifyCallback('{token}');
                 }}
@@ -273,19 +285,16 @@ def perform_renewal_with_browser():
                     onSuccess('{token}');
                 }}
 
-                // 3. 尝试调用 grecaptcha 的 callback
+                // 3. 如果存在 grecaptcha 回调
                 if (window.grecaptcha && grecaptcha.getResponse) {{
-                    // 部分页面通过 setResponse 私有方法，这里用不到
+                    // 某些页面会定期检查 getResponse，所以无需额外操作
                 }}
 
-                // 4. 触发 .g-recaptcha 元素的事件
+                // 4. 触发容器事件
                 var recaptchaElem = document.querySelector('.g-recaptcha');
                 if (recaptchaElem) {{
                     recaptchaElem.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    recaptchaElem.dispatchEvent(new Event('input', {{ bubbles: true }}));
                 }}
-
-                // 5. 如果有 iframe，尝试通信（一般不需要）
                 return true;
             }})();
         """
@@ -293,29 +302,21 @@ def perform_renewal_with_browser():
         print("✅ token 注入完成")
         time.sleep(2)
 
-        # ---- 验证 token 是否填充成功 ----
+        # ---- 验证 token 是否填充 ----
         token_filled = sb.execute_script("""
             var textarea = document.getElementById('g-recaptcha-response');
             return textarea ? textarea.value.length > 0 : false;
         """)
         if not token_filled:
-            print("⚠️ token 似乎未填充，尝试强制写入")
-            # 强制写入
+            print("⚠️ token 未填充，强制写入")
             sb.execute_script(f"""
-                var textarea = document.getElementById('g-recaptcha-response');
-                if (textarea) {{
-                    textarea.value = '{token}';
-                    textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                }}
+                document.getElementById('g-recaptcha-response').value = '{token}';
             """)
             time.sleep(1)
-        else:
-            print("✅ token 已填充到 textarea")
 
-        # 额外截图保存状态
         screenshot_step(sb, "after_inject")
 
-        # ========== 6. 第二次点击 Renew（提交续期） ==========
+        # ========== 7. 第二次点击 Renew（提交续期） ==========
         print("🔘 第二次点击 Renew server 按钮（提交续期）...")
         if not click_renew():
             error_msg = "第二次点击 Renew 失败"
@@ -333,7 +334,7 @@ def perform_renewal_with_browser():
         sb.sleep(5)
         screenshot_step(sb, "after_reload")
 
-        # ========== 7. 提取过期日期 ==========
+        # ========== 8. 提取过期日期 ==========
         new_expiry_str = None
         expiry_selectors = ['#expireDate', '.expiry-date', 'span:contains("Expires")', 'div:contains("Expires")']
         for sel in expiry_selectors:
@@ -424,7 +425,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal with Ace Data Cloud Token API")
+    print("🚀 Starting Host2Play renewal with Ace Data Cloud Token API (manual checkbox click)")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
