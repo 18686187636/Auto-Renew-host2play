@@ -382,59 +382,31 @@ def perform_renewal_with_browser():
             sb.switch_to_default_content()
             screenshot_step(sb, "checkbox_error")
 
-        # ========== 5. 等待图像验证出现 ==========
-        print("⏳ 等待图像验证加载...")
-        image_loaded = False
-        for attempt in range(12):
-            time.sleep(2)
+        # ========== 5. 等待并提取问题文本（循环尝试） ==========
+        print("⏳ 等待图像验证并提取问题...")
+        question_code = None
+        max_attempts = 8
+        for attempt in range(max_attempts):
             try:
-                sb.switch_to_frame('iframe[src*="recaptcha"]')
-                img = sb.find_element('img', timeout=1)
-                if img:
-                    print("✅ 图像验证已加载")
-                    image_loaded = True
-                    sb.switch_to_default_content()
-                    break
-            except:
-                sb.switch_to_default_content()
-                continue
-
-        if not image_loaded:
-            print("⚠️ 图像验证未自动出现，尝试重新触发...")
-            click_renew()
-            time.sleep(5)
-            for attempt in range(6):
+                question_code = extract_question_from_page(sb)
+                print(f"🧩 问题代码: {question_code}")
+                screenshot_step(sb, "question_extracted")
+                break
+            except Exception as e:
+                print(f"尝试 {attempt+1}/{max_attempts} 提取失败: {e}")
                 time.sleep(2)
-                try:
-                    sb.switch_to_frame('iframe[src*="recaptcha"]')
-                    img = sb.find_element('img', timeout=1)
-                    if img:
-                        print("✅ 重新触发后图像验证加载")
-                        image_loaded = True
-                        sb.switch_to_default_content()
-                        break
-                except:
-                    sb.switch_to_default_content()
-                    continue
+                if attempt == 3:
+                    # 中途尝试重新触发
+                    print("⚠️ 尝试重新触发验证...")
+                    click_renew()
+                    time.sleep(3)
 
-        if not image_loaded:
-            error_msg = "图像验证未能加载，可能被拦截或网络问题"
-            screenshot_step(sb, "image_not_loaded")
-            return False, None, error_msg, server_name
-
-        screenshot_step(sb, "image_loaded")
-
-        # ========== 6. 提取问题文本 ==========
-        try:
-            question_code = extract_question_from_page(sb)
-            print(f"🧩 Question code: {question_code}")
-            screenshot_step(sb, "question_extracted")
-        except Exception as e:
-            error_msg = f"提取问题失败: {e}"
+        if question_code is None:
+            error_msg = "提取问题失败，可能图像验证未加载"
             screenshot_step(sb, "question_failed")
             return False, None, error_msg, server_name
 
-        # ========== 7. 截取验证图像 ==========
+        # ========== 6. 截取验证图像 ==========
         try:
             captcha_img = capture_recaptcha_image(sb)
             print("📸 图像已截取")
@@ -444,7 +416,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "capture_failed")
             return False, None, error_msg, server_name
 
-        # ========== 8. 调用 Ace Data Cloud 识别 ==========
+        # ========== 7. 调用 Ace Data Cloud 识别 ==========
         try:
             objects, grid_size = solve_recaptcha_via_acedata(captcha_img, question_code)
             print(f"🧩 需要点击的索引: {objects}")
@@ -454,7 +426,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "api_failed")
             return False, None, error_msg, server_name
 
-        # ========== 9. 点击网格 ==========
+        # ========== 8. 点击网格 ==========
         try:
             click_recaptcha_grid(sb, objects, grid_size)
             print("✅ 网格点击完成")
@@ -465,7 +437,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "click_grid_failed")
             return False, None, error_msg, server_name
 
-        # ========== 10. 第二次点击 Renew（提交） ==========
+        # ========== 9. 第二次点击 Renew（提交） ==========
         print("🔘 第二次点击 Renew（提交续期）...")
         if not click_renew():
             error_msg = "第二次点击失败"
@@ -483,7 +455,7 @@ def perform_renewal_with_browser():
         sb.sleep(5)
         screenshot_step(sb, "after_reload")
 
-        # ========== 11. 提取新的到期时间 ==========
+        # ========== 10. 提取新的到期时间 ==========
         new_expiry_str = None
         expiry_selectors = ['#expireDate', '.expiry-date', 'span:contains("Expires")', 'div:contains("Expires")']
         for sel in expiry_selectors:
