@@ -22,7 +22,7 @@ except ImportError:
 
 # ==================== 配置区域 ====================
 RENEW_URLS = [
-    "https://host2play.gratis/server/renew?i=62c3c856-9400-4220-9ec0-c3cd6348d5f8",
+    "https://host2play.gratis/server/renew?i=51b0dc2e-b901-46bf-b47a-20f5e6051459",
     # 添加更多链接
 ]
 
@@ -79,9 +79,13 @@ def send_tg_message(token, chat_id, text):
     except Exception as e:
         log(f"Telegram 消息异常: {e}", "ERROR")
 
-# ==================== 获取 GitHub 工作流 ID ====================
+# ==================== 获取 GitHub 工作流 ID（增强匹配） ====================
 def get_github_workflow_id(owner, repo, workflow_file, token):
-    """通过 GitHub API 获取工作流文件的数字 ID（不依赖路径）"""
+    """通过 GitHub API 获取工作流文件的数字 ID（支持多种输入格式）"""
+    # 清理输入：去除首尾空格、引号
+    workflow_file = workflow_file.strip().strip('"').strip("'")
+    log(f"🔍 尝试获取工作流 ID，输入文件名: '{workflow_file}'", "DEBUG")
+
     url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows"
     headers = {
         "Accept": "application/vnd.github+json",
@@ -92,16 +96,30 @@ def get_github_workflow_id(owner, repo, workflow_file, token):
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
         data = resp.json()
-        target_filename = os.path.basename(workflow_file)  # 只取文件名
-        for wf in data.get("workflows", []):
+        workflows = data.get("workflows", [])
+        log(f"📋 仓库中的工作流: {[wf['path'] for wf in workflows]}", "DEBUG")
+
+        # 准备候选匹配项（多种格式）
+        candidates = []
+        if workflow_file.startswith(".github/workflows/"):
+            candidates.append(workflow_file)
+        else:
+            candidates.append(f".github/workflows/{workflow_file}")
+        candidates.append(workflow_file)
+        candidates.append(os.path.basename(workflow_file))
+
+        # 去重
+        candidates = list(dict.fromkeys(candidates))
+        log(f"🔍 将尝试匹配以下路径: {candidates}", "DEBUG")
+
+        for wf in workflows:
             wf_path = wf.get("path", "")
-            if os.path.basename(wf_path) == target_filename:
-                log(f"✅ 找到工作流: {wf_path} (ID: {wf.get('id')})")
-                return wf.get("id")
-        log(f"❌ 未找到工作流文件: {target_filename}", "ERROR")
-        # 调试输出：列出所有工作流路径
-        paths = [wf.get("path") for wf in data.get("workflows", [])]
-        log(f"现有工作流: {paths}", "DEBUG")
+            for cand in candidates:
+                if wf_path == cand or os.path.basename(wf_path) == cand:
+                    log(f"✅ 找到匹配的工作流: {wf_path} (ID: {wf.get('id')})")
+                    return wf.get("id")
+
+        log(f"❌ 未找到任何匹配的工作流。尝试的文件名: {candidates}", "ERROR")
         return None
     except Exception as e:
         log(f"❌ 获取工作流 ID 失败: {e}", "ERROR")
