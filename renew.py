@@ -240,6 +240,85 @@ def extract_question_from_page(sb):
             pass
         raise Exception("Could not find reCAPTCHA question text. Page source saved for debugging.")
 
+# ========== 新增：将问题文本映射为问题代码 ==========
+def question_text_to_code(question_text):
+    """
+    将问题文本（中文或英文）映射为 Ace Data Cloud API 所需的 /m/ 代码。
+    """
+    if not question_text:
+        return None
+
+    # 1. 中文映射表
+    question_map_cn = {
+        "出租车": "/m/0pg52",
+        "巴士": "/m/01bjv",
+        "校车": "/m/02yvhj",
+        "摩托车": "/m/04_sv",
+        "拖拉机": "/m/013xlm",
+        "烟囱": "/m/01jk_4",
+        "人行横道": "/m/014xcs",
+        "红绿灯": "/m/015qff",
+        "自行车": "/m/0199g",
+        "停车计价表": "/m/015qbp",
+        "汽车": "/m/0k4j",
+        "桥": "/m/015kr",
+        "船": "/m/019jd",
+        "棕榈树": "/m/0cdl1",
+        "山": "/m/09d_r",
+        "消防栓": "/m/01pns0",
+        "楼梯": "/m/01lynh"
+    }
+    # 2. 英文映射表（常见类别）
+    question_map_en = {
+        "traffic lights": "/m/015qff",
+        "crosswalks": "/m/014xcs",
+        "bicycles": "/m/0199g",
+        "cars": "/m/0k4j",
+        "motorcycles": "/m/04_sv",
+        "buses": "/m/01bjv",
+        "trucks": "/m/07jdr",
+        "fire hydrants": "/m/01pns0",
+        "boats": "/m/019jd",
+        "bridges": "/m/015kr",
+        "palm trees": "/m/0cdl1",
+        "mountains": "/m/09d_r",
+        "stairs": "/m/01lynh",
+        "chimneys": "/m/01jk_4",
+        "tractors": "/m/013xlm",
+        "buses": "/m/01bjv",
+        "school buses": "/m/02yvhj",
+        "parking meters": "/m/015qbp",
+        "bicycles": "/m/0199g"
+    }
+
+    # 合并映射表（优先中文，后英文）
+    full_map = {**question_map_cn, **question_map_en}
+
+    # 尝试直接匹配
+    text_lower = question_text.lower()
+    for key, code in full_map.items():
+        if key in text_lower:
+            return code
+
+    # 如果包含 "all images with" 等模式，提取后面的关键词
+    match = re.search(r'(?:all images with|select all images with)\s+(.+)', text_lower)
+    if match:
+        keywords = match.group(1).strip()
+        # 尝试从关键词中提取第一个名词
+        words = re.split(r'[,\s]+', keywords)
+        for word in words:
+            if word:
+                for key, code in full_map.items():
+                    if key.startswith(word) or word in key:
+                        return code
+
+    # 最后尝试正则匹配 /m/ 代码
+    match = re.search(r'/m/[a-z0-9]+', question_text)
+    if match:
+        return match.group(0)
+
+    return None
+
 def capture_recaptcha_image(sb):
     try:
         iframes = sb.find_elements('iframe[src*="recaptcha"]')
@@ -446,36 +525,10 @@ def perform_renewal_with_browser():
             try:
                 question_text = extract_question_from_page(sb)
                 print(f"🧩 提取到的问题文本: {question_text}")
-                # 将问题文本转换为问题代码（映射）
-                question_map = {
-                    "出租车": "/m/0pg52",
-                    "巴士": "/m/01bjv",
-                    "校车": "/m/02yvhj",
-                    "摩托车": "/m/04_sv",
-                    "拖拉机": "/m/013xlm",
-                    "烟囱": "/m/01jk_4",
-                    "人行横道": "/m/014xcs",
-                    "红绿灯": "/m/015qff",
-                    "自行车": "/m/0199g",
-                    "停车计价表": "/m/015qbp",
-                    "汽车": "/m/0k4j",
-                    "桥": "/m/015kr",
-                    "船": "/m/019jd",
-                    "棕榈树": "/m/0cdl1",
-                    "山": "/m/09d_r",
-                    "消防栓": "/m/01pns0",
-                    "楼梯": "/m/01lynh"
-                }
-                question_code = None
-                for cn, code in question_map.items():
-                    if cn in question_text:
-                        question_code = code
-                        break
-                if not question_code:
-                    match = re.search(r'/m/[a-z0-9]+', question_text)
-                    if match:
-                        question_code = match.group(0)
-                if question_code:
+                # 转换为问题代码
+                code = question_text_to_code(question_text)
+                if code:
+                    question_code = code
                     print(f"🧩 问题代码: {question_code}")
                     screenshot_step(sb, "question_extracted")
                     break
