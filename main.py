@@ -81,7 +81,7 @@ def send_tg_message(token, chat_id, text):
 
 # ==================== 获取 GitHub 工作流 ID ====================
 def get_github_workflow_id(owner, repo, workflow_file, token):
-    """通过 GitHub API 获取工作流文件的数字 ID"""
+    """通过 GitHub API 获取工作流文件的数字 ID（不依赖路径）"""
     url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows"
     headers = {
         "Accept": "application/vnd.github+json",
@@ -92,20 +92,26 @@ def get_github_workflow_id(owner, repo, workflow_file, token):
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
         data = resp.json()
+        target_filename = os.path.basename(workflow_file)  # 只取文件名
         for wf in data.get("workflows", []):
-            if wf.get("path") == f".github/workflows/{workflow_file}":
+            wf_path = wf.get("path", "")
+            if os.path.basename(wf_path) == target_filename:
+                log(f"✅ 找到工作流: {wf_path} (ID: {wf.get('id')})")
                 return wf.get("id")
-        log(f"❌ 未找到工作流文件: {workflow_file}", "ERROR")
+        log(f"❌ 未找到工作流文件: {target_filename}", "ERROR")
+        # 调试输出：列出所有工作流路径
+        paths = [wf.get("path") for wf in data.get("workflows", [])]
+        log(f"现有工作流: {paths}", "DEBUG")
         return None
     except Exception as e:
         log(f"❌ 获取工作流 ID 失败: {e}", "ERROR")
         return None
 
-# ==================== cron-job.org 定时任务管理（使用数字工作流 ID） ====================
+# ==================== cron-job.org 定时任务管理 ====================
 def schedule_cronjob(trigger_timestamp):
     """
     使用 cron-job.org API 创建定时任务，触发时间为 trigger_timestamp（Unix 时间戳）。
-    参考 Therose cloud 脚本的成功实现，不设置重试。
+    使用数字工作流 ID 构造 URL。
     """
     if not CRONJOB_API_KEY or not GH_TOKEN or not REPO_OWNER or not REPO_NAME:
         log("缺少 CRONJOB_API_KEY 或 GH_TOKEN 等环境变量，跳过定时任务设置", "WARN")
