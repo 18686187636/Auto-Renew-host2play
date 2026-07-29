@@ -3,3 +3,5 @@ beautifulsoup4>=4.11.0
 pytz>=2022.7
 seleniumbase==4.22.3
 Pillow>=9.0.0
+speechrecognition>=3.10.0
+pydub>=0.25.1
