@@ -114,26 +114,35 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
             raise Exception("No reCAPTCHA iframe found")
     except Exception as e:
         raise Exception(f"Failed to switch to reCAPTCHA iframe: {e}")
+
+    # 查找图片元素（img 或 canvas）
     img_elem = None
     try:
-        img_elem = sb.find_element('img', timeout=3)
+        img_elem = sb.find_element('img', timeout=2)
     except:
+        pass
+
+    if not img_elem:
         try:
-            img_elem = sb.find_element('canvas', timeout=3)
+            img_elem = sb.find_element('canvas', timeout=2)
         except:
             pass
+
     if not img_elem:
-        raise Exception("Could not find reCAPTCHA image element")
+        raise Exception("Could not find reCAPTCHA image element (img or canvas)")
+
     location = img_elem.location
     size = img_elem.size
     left = location['x']
     top = location['y']
     width = size['width']
     height = size['height']
+
     cols = 3
     rows = 3
     cell_w = width / cols
     cell_h = height / rows
+
     actions = sb.driver.action_chains
     for idx in objects:
         row = idx // cols
@@ -143,9 +152,10 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
         print(f"🔘 Clicking index {idx} at ({x:.0f}, {y:.0f})")
         actions.move_by_offset(x, y).click().perform()
         time.sleep(0.5)
+
     sb.switch_to_default_content()
 
-# ========== 改进后的 extract_question_from_page ==========
+# ==================== 改进后的 extract_question_from_page ====================
 def extract_question_from_page(sb):
     # 方法1：传统方式 - 在主页和 iframe 中查找指定类
     try:
@@ -221,10 +231,8 @@ def extract_question_from_page(sb):
     if question_text and question_text.strip():
         return question_text.strip()
     else:
-        # 保存页面源码以便调试
         with open("page_source_debug.html", "w", encoding="utf-8") as f:
             f.write(sb.get_page_source())
-        # 保存所有 iframe 内容
         try:
             iframes = sb.find_elements('iframe')
             for idx, iframe in enumerate(iframes):
@@ -240,86 +248,9 @@ def extract_question_from_page(sb):
             pass
         raise Exception("Could not find reCAPTCHA question text. Page source saved for debugging.")
 
-# ========== 新增：将问题文本映射为问题代码 ==========
-def question_text_to_code(question_text):
-    """
-    将问题文本（中文或英文）映射为 Ace Data Cloud API 所需的 /m/ 代码。
-    """
-    if not question_text:
-        return None
-
-    # 1. 中文映射表
-    question_map_cn = {
-        "出租车": "/m/0pg52",
-        "巴士": "/m/01bjv",
-        "校车": "/m/02yvhj",
-        "摩托车": "/m/04_sv",
-        "拖拉机": "/m/013xlm",
-        "烟囱": "/m/01jk_4",
-        "人行横道": "/m/014xcs",
-        "红绿灯": "/m/015qff",
-        "自行车": "/m/0199g",
-        "停车计价表": "/m/015qbp",
-        "汽车": "/m/0k4j",
-        "桥": "/m/015kr",
-        "船": "/m/019jd",
-        "棕榈树": "/m/0cdl1",
-        "山": "/m/09d_r",
-        "消防栓": "/m/01pns0",
-        "楼梯": "/m/01lynh"
-    }
-    # 2. 英文映射表（常见类别）
-    question_map_en = {
-        "traffic lights": "/m/015qff",
-        "crosswalks": "/m/014xcs",
-        "bicycles": "/m/0199g",
-        "cars": "/m/0k4j",
-        "motorcycles": "/m/04_sv",
-        "buses": "/m/01bjv",
-        "trucks": "/m/07jdr",
-        "fire hydrants": "/m/01pns0",
-        "boats": "/m/019jd",
-        "bridges": "/m/015kr",
-        "palm trees": "/m/0cdl1",
-        "mountains": "/m/09d_r",
-        "stairs": "/m/01lynh",
-        "chimneys": "/m/01jk_4",
-        "tractors": "/m/013xlm",
-        "buses": "/m/01bjv",
-        "school buses": "/m/02yvhj",
-        "parking meters": "/m/015qbp",
-        "bicycles": "/m/0199g"
-    }
-
-    # 合并映射表（优先中文，后英文）
-    full_map = {**question_map_cn, **question_map_en}
-
-    # 尝试直接匹配
-    text_lower = question_text.lower()
-    for key, code in full_map.items():
-        if key in text_lower:
-            return code
-
-    # 如果包含 "all images with" 等模式，提取后面的关键词
-    match = re.search(r'(?:all images with|select all images with)\s+(.+)', text_lower)
-    if match:
-        keywords = match.group(1).strip()
-        # 尝试从关键词中提取第一个名词
-        words = re.split(r'[,\s]+', keywords)
-        for word in words:
-            if word:
-                for key, code in full_map.items():
-                    if key.startswith(word) or word in key:
-                        return code
-
-    # 最后尝试正则匹配 /m/ 代码
-    match = re.search(r'/m/[a-z0-9]+', question_text)
-    if match:
-        return match.group(0)
-
-    return None
-
+# ==================== 改进后的 capture_recaptcha_image（兼容 img 和 canvas） ====================
 def capture_recaptcha_image(sb):
+    # 先尝试切换到 reCAPTCHA 的 iframe
     try:
         iframes = sb.find_elements('iframe[src*="recaptcha"]')
         for iframe in iframes:
@@ -329,26 +260,67 @@ def capture_recaptcha_image(sb):
             raise Exception("No reCAPTCHA iframe found")
     except Exception as e:
         raise Exception(f"Failed to switch to reCAPTCHA iframe: {e}")
+
+    # 查找图片元素（img 或 canvas）
     img_elem = None
     try:
-        img_elem = sb.find_element('img', timeout=3)
+        img_elem = sb.find_element('img', timeout=2)
+        print("✅ 找到 <img> 元素")
     except:
+        pass
+
+    if not img_elem:
         try:
-            img_elem = sb.find_element('canvas', timeout=3)
+            img_elem = sb.find_element('canvas', timeout=2)
+            print("✅ 找到 <canvas> 元素")
         except:
             pass
+
     if not img_elem:
-        raise Exception("Could not find reCAPTCHA image element")
+        # 尝试用 JavaScript 查找任何图片相关的元素
+        js_img = sb.execute_script("""
+            var imgs = document.querySelectorAll('img, canvas');
+            for (var i = 0; i < imgs.length; i++) {
+                var rect = imgs[i].getBoundingClientRect();
+                if (rect.width > 50 && rect.height > 50) {
+                    return imgs[i];
+                }
+            }
+            return null;
+        """)
+        if js_img:
+            img_elem = js_img
+            print("✅ 通过 JavaScript 找到图片元素")
+
+    if not img_elem:
+        raise Exception("Could not find reCAPTCHA image element (img or canvas)")
+
+    # 获取元素位置和大小
     location = img_elem.location
     size = img_elem.size
     left = location['x']
     top = location['y']
     width = size['width']
     height = size['height']
+
+    print(f"📐 图片位置: left={left}, top={top}, width={width}, height={height}")
+
+    # 截取全屏并裁剪
     png_data = sb.driver.get_screenshot_as_png()
     img = Image.open(io.BytesIO(png_data))
-    cropped = img.crop((left, top, left + width, top + height))
+
+    # 确保裁剪区域在图片范围内
+    crop_left = max(0, int(left))
+    crop_top = max(0, int(top))
+    crop_right = min(img.width, int(left + width))
+    crop_bottom = min(img.height, int(top + height))
+
+    if crop_right <= crop_left or crop_bottom <= crop_top:
+        raise Exception(f"Invalid crop dimensions: {crop_left}, {crop_top}, {crop_right}, {crop_bottom}")
+
+    cropped = img.crop((crop_left, crop_top, crop_right, crop_bottom))
     resized = cropped.resize((300, 300), Image.LANCZOS)
+
     sb.switch_to_default_content()
     return resized
 
@@ -365,7 +337,7 @@ def perform_renewal_with_browser():
 
     sb_kwargs = {
         "uc": True,
-        "headless": False,      # 启用 Xvfb 时必须为 False
+        "headless": False,
         "xvfb": True,
         "page_load_strategy": "eager"
     }
@@ -504,7 +476,6 @@ def perform_renewal_with_browser():
             print(f"⚠️ 勾选失败: {e}")
             sb.switch_to_default_content()
             screenshot_step(sb, "checkbox_error")
-            # 备用：尝试 CDP 点击
             try:
                 print("🔄 尝试 CDP 点击复选框...")
                 sb.cdp.gui_click_element('#recaptcha-anchor')
@@ -525,10 +496,71 @@ def perform_renewal_with_browser():
             try:
                 question_text = extract_question_from_page(sb)
                 print(f"🧩 提取到的问题文本: {question_text}")
-                # 转换为问题代码
-                code = question_text_to_code(question_text)
-                if code:
-                    question_code = code
+
+                # 英文到代码的映射
+                question_map_en = {
+                    "traffic lights": "/m/015qff",
+                    "crosswalks": "/m/014xcs",
+                    "bicycles": "/m/0199g",
+                    "cars": "/m/0k4j",
+                    "motorcycles": "/m/04_sv",
+                    "buses": "/m/01bjv",
+                    "trucks": "/m/07jdr",
+                    "fire hydrant": "/m/01pns0",
+                    "fire hydrants": "/m/01pns0",
+                    "boats": "/m/019jd",
+                    "boats": "/m/019jd",
+                    "bridges": "/m/015kr",
+                    "mountains": "/m/09d_r",
+                    "stairs": "/m/01lynh",
+                    "chimneys": "/m/01jk_4",
+                    "palm trees": "/m/0cdl1",
+                    "parking meters": "/m/015qbp",
+                    "school buses": "/m/02yvhj",
+                    "tractors": "/m/013xlm",
+                    "buses": "/m/01bjv"
+                }
+
+                question_code = None
+                question_lower = question_text.lower()
+                for key, code in question_map_en.items():
+                    if key in question_lower:
+                        question_code = code
+                        break
+
+                # 如果英文映射失败，尝试中文映射
+                if not question_code:
+                    question_map_cn = {
+                        "出租车": "/m/0pg52",
+                        "巴士": "/m/01bjv",
+                        "校车": "/m/02yvhj",
+                        "摩托车": "/m/04_sv",
+                        "拖拉机": "/m/013xlm",
+                        "烟囱": "/m/01jk_4",
+                        "人行横道": "/m/014xcs",
+                        "红绿灯": "/m/015qff",
+                        "自行车": "/m/0199g",
+                        "停车计价表": "/m/015qbp",
+                        "汽车": "/m/0k4j",
+                        "桥": "/m/015kr",
+                        "船": "/m/019jd",
+                        "棕榈树": "/m/0cdl1",
+                        "山": "/m/09d_r",
+                        "消防栓": "/m/01pns0",
+                        "楼梯": "/m/01lynh"
+                    }
+                    for cn, code in question_map_cn.items():
+                        if cn in question_text:
+                            question_code = code
+                            break
+
+                # 如果还是失败，尝试从文本中提取 /m/ 代码
+                if not question_code:
+                    match = re.search(r'/m/[a-z0-9]+', question_text)
+                    if match:
+                        question_code = match.group(0)
+
+                if question_code:
                     print(f"🧩 问题代码: {question_code}")
                     screenshot_step(sb, "question_extracted")
                     break
@@ -688,7 +720,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal (xvfb mode with enhanced extraction)")
+    print("🚀 Starting Host2Play renewal (xvfb mode with img/canvas support)")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
