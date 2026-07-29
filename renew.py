@@ -27,8 +27,8 @@ REPO_OWNER = os.getenv("REPO_OWNER")
 REPO_NAME = os.getenv("REPO_NAME")
 WORKFLOW_FILE = os.getenv("WORKFLOW_FILE", "renew.yml")
 BRANCH = os.getenv("BRANCH", "main")
-PROXY = os.getenv("PROXY")                          # socks5://127.0.0.1:1080
-CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")      # Ace Data Cloud Token
+PROXY = os.getenv("PROXY")
+CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")
 
 # ==================== 辅助函数 ====================
 def send_tg_message(text):
@@ -236,13 +236,11 @@ def perform_renewal_with_browser():
     server_name = "Unknown"
 
     print("🌍 正在获取当前出口 IP...")
-    proxy_for_ip = PROXY if PROXY else None
-    ip = get_current_ip(proxy_for_ip)
+    ip = get_current_ip(PROXY if PROXY else None)
     print(f"📍 当前出口 IP: {ip}")
 
     sb_kwargs = {
         "uc": True,
-        "uc_cdp": True,              # 启用 CDP 绕过
         "headless": True,
         "page_load_strategy": "eager"
     }
@@ -276,28 +274,23 @@ def perform_renewal_with_browser():
         except Exception as e:
             print(f"⚠️ CDP 注入失败: {e}")
 
-        # ---- 加载页面（使用带重连的方法） ----
+        # ---- 加载页面 ----
         print("🌐 Opening renewal page...")
-        try:
-            sb.uc_open_with_reconnect(RENEW_URL, reconnect_time=5)
-        except Exception as e:
-            print(f"⚠️ uc_open_with_reconnect 失败，使用普通 open: {e}")
-            sb.open(RENEW_URL)
-
+        sb.open(RENEW_URL)
         sb.wait_for_ready_state_complete()
         sb.sleep(8)
         screenshot_step(sb, "page_loaded")
 
-        # ---- 精确检测 Cloudflare 拦截（仅当标题为 "Just a moment..."） ----
+        # ---- 检测 Cloudflare 拦截（仅看标题） ----
         title = sb.get_title()
         if "Just a moment" in title or "524" in title:
-            error_msg = "Cloudflare 拦截（重连失败），请更换代理"
+            error_msg = "Cloudflare 拦截，请更换代理"
             screenshot_step(sb, "blocked")
             return False, None, error_msg, server_name
         else:
             print("✅ 页面正常加载")
 
-        # ========== 优先处理 Consent 按钮 ==========
+        # ========== 1. 点击 Consent 按钮 ==========
         try:
             consent_selectors = [
                 'button:contains("Consent")',
@@ -321,81 +314,8 @@ def perform_renewal_with_browser():
         except Exception as e:
             print(f"⚠️ 处理 Consent 时出错（忽略）: {e}")
 
-        # ---- 获取服务器名称 ----
-        try:
-            name_elem = sb.find_element('#serverName', timeout=2)
-            if name_elem:
-                server_name = name_elem.text.strip()
-        except:
-            pass
-
-        # ---- 获取当前过期时间 ----
-        old_expiry_str = None
-        expiry_selectors = ['#expireDate', '.expiry-date', 'span:contains("Expires")', 'div:contains("Expires")']
-        for sel in expiry_selectors:
-            try:
-                elem = sb.find_element(sel, timeout=1)
-                if elem:
-                    text = elem.text.strip()
-                    match = re.search(r'(\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?)', text)
-                    if match:
-                        old_expiry_str = match.group(1)
-                        break
-            except:
-                continue
-        print(f"📅 Current expiry (raw): {old_expiry_str}")
-
-        # ---- 触发 reCAPTCHA ----
-        try:
-            recaptcha_checkbox = sb.find_element('.g-recaptcha', timeout=5)
-            if recaptcha_checkbox:
-                sb.uc_click('.g-recaptcha')
-                print("✅ Clicked reCAPTCHA checkbox")
-                time.sleep(5)
-        except:
-            pass
-
-        print("⏳ 等待 reCAPTCHA 图像加载...")
-        time.sleep(8)
-
-        # ---- 提取问题 ----
-        try:
-            question_code = extract_question_from_page(sb)
-            print(f"🧩 Question code: {question_code}")
-        except Exception as e:
-            error_msg = f"Failed to extract question: {e}"
-            screenshot_step(sb, "question_failed")
-            return False, None, error_msg, server_name
-
-        # ---- 截图并打码 ----
-        try:
-            captcha_img = capture_recaptcha_image(sb)
-            print("📸 reCAPTCHA image captured and resized to 300x300")
-        except Exception as e:
-            error_msg = f"Failed to capture reCAPTCHA image: {e}"
-            screenshot_step(sb, "capture_failed")
-            return False, None, error_msg, server_name
-
-        try:
-            objects, grid_size = solve_recaptcha_via_acedata(captcha_img, question_code)
-            print(f"🧩 Objects to click: {objects}")
-        except Exception as e:
-            error_msg = f"Ace Data Cloud error: {e}"
-            screenshot_step(sb, "api_failed")
-            return False, None, error_msg, server_name
-
-        # ---- 点击网格 ----
-        try:
-            click_recaptcha_grid(sb, objects, grid_size)
-            print("✅ reCAPTCHA grid clicked")
-            time.sleep(2)
-        except Exception as e:
-            error_msg = f"Failed to click grid: {e}"
-            screenshot_step(sb, "click_grid_failed")
-            return False, None, error_msg, server_name
-
-        # ---- 点击续期按钮 ----
-        print("🔘 Clicking Renew server button...")
+        # ========== 2. 点击 Renew server 按钮（触发 reCAPTCHA） ==========
+        print("🔘 点击 Renew server 按钮...")
         clicked = False
         btn_selectors = [
             'button.btn-primary:contains("Renew")',
@@ -404,11 +324,11 @@ def perform_renewal_with_browser():
             'button[onclick*="renew()"]',
             '.btn-primary:contains("Renew")'
         ]
-        for sel in btn_selectors:
+        for selector in btn_selectors:
             try:
-                sb.uc_click(sel, timeout=3)
+                sb.uc_click(selector, timeout=3)
                 clicked = True
-                print(f"✅ Clicked using selector: {sel}")
+                print(f"✅ 已点击 Renew 按钮 (selector: {selector})")
                 break
             except:
                 continue
@@ -416,26 +336,111 @@ def perform_renewal_with_browser():
             try:
                 sb.execute_script("renew();")
                 clicked = True
-                print("✅ Clicked via JavaScript renew()")
+                print("✅ 通过 JavaScript 点击 Renew 按钮")
             except:
                 pass
         if not clicked:
-            error_msg = "Could not click Renew button"
-            screenshot_step(sb, "click_failed")
+            error_msg = "无法点击 Renew 按钮"
+            screenshot_step(sb, "renew_click_failed")
             return False, None, error_msg, server_name
 
-        screenshot_step(sb, "after_click")
-        print("⏳ 等待续期完成...")
+        # ---- 等待 reCAPTCHA 出现 ----
+        print("⏳ 等待 reCAPTCHA 加载...")
+        time.sleep(5)
+
+        # ========== 3. 点击 reCAPTCHA 复选框 ==========
+        try:
+            recaptcha_checkbox = sb.find_element('.g-recaptcha', timeout=5)
+            if recaptcha_checkbox:
+                sb.uc_click('.g-recaptcha')
+                print("✅ 点击 reCAPTCHA 复选框")
+                time.sleep(5)
+            else:
+                print("⚠️ 未找到 reCAPTCHA 复选框，可能已通过验证")
+        except Exception as e:
+            print(f"⚠️ 点击 reCAPTCHA 复选框失败: {e}")
+            # 如果失败，可能之前已验证，继续尝试
+
+        print("⏳ 等待 reCAPTCHA 图像加载...")
+        time.sleep(8)
+        screenshot_step(sb, "after_recaptcha_click")
+
+        # ========== 4. 提取问题并打码 ==========
+        try:
+            question_code = extract_question_from_page(sb)
+            print(f"🧩 Question code: {question_code}")
+        except Exception as e:
+            error_msg = f"提取问题失败: {e}"
+            screenshot_step(sb, "question_failed")
+            return False, None, error_msg, server_name
+
+        try:
+            captcha_img = capture_recaptcha_image(sb)
+            print("📸 已截取 reCAPTCHA 图像并缩放至 300x300")
+        except Exception as e:
+            error_msg = f"截取图像失败: {e}"
+            screenshot_step(sb, "capture_failed")
+            return False, None, error_msg, server_name
+
+        try:
+            objects, grid_size = solve_recaptcha_via_acedata(captcha_img, question_code)
+            print(f"🧩 需要点击的索引: {objects}")
+        except Exception as e:
+            error_msg = f"Ace Data Cloud 打码失败: {e}"
+            screenshot_step(sb, "api_failed")
+            return False, None, error_msg, server_name
+
+        try:
+            click_recaptcha_grid(sb, objects, grid_size)
+            print("✅ 已点击 reCAPTCHA 网格")
+            time.sleep(2)
+        except Exception as e:
+            error_msg = f"点击网格失败: {e}"
+            screenshot_step(sb, "click_grid_failed")
+            return False, None, error_msg, server_name
+
+        # ---- 等待验证完成 ----
+        print("⏳ 等待验证完成...")
+        time.sleep(5)
+
+        # ========== 5. 再次点击 Renew 按钮（提交续期） ==========
+        print("🔘 再次点击 Renew 按钮以提交续期...")
+        clicked = False
+        for selector in btn_selectors:
+            try:
+                sb.uc_click(selector, timeout=3)
+                clicked = True
+                print(f"✅ 点击提交 (selector: {selector})")
+                break
+            except:
+                continue
+        if not clicked:
+            try:
+                sb.execute_script("renew();")
+                clicked = True
+                print("✅ 通过 JavaScript 提交续期")
+            except:
+                pass
+        if not clicked:
+            error_msg = "无法点击提交按钮"
+            screenshot_step(sb, "submit_failed")
+            return False, None, error_msg, server_name
+
+        screenshot_step(sb, "after_submit")
+        print("⏳ 等待续期处理...")
         time.sleep(10)
 
-        # ---- 刷新页面获取新日期 ----
-        print("🔄 Refreshing page...")
+        # ---- 刷新页面获取新过期时间 ----
+        print("🔄 刷新页面获取更新...")
         sb.open(RENEW_URL)
         sb.wait_for_ready_state_complete()
         sb.sleep(5)
         screenshot_step(sb, "after_reload")
 
+        # ========== 6. 提取过期日期 ==========
+        old_expiry_str = None   # 这里我们不需要比较，直接取新的
         new_expiry_str = None
+        expiry_selectors = ['#expireDate', '.expiry-date', 'span:contains("Expires")', 'div:contains("Expires")']
         for sel in expiry_selectors:
             try:
                 elem = sb.find_element(sel, timeout=2)
@@ -449,8 +454,9 @@ def perform_renewal_with_browser():
                 continue
         print(f"📅 New expiry (raw): {new_expiry_str}")
 
-        if new_expiry_str and new_expiry_str != old_expiry_str:
+        if new_expiry_str:
             try:
+                # 尝试多种格式
                 for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
                     try:
                         expiry_dt = datetime.strptime(new_expiry_str, fmt)
@@ -460,17 +466,14 @@ def perform_renewal_with_browser():
                     except ValueError:
                         continue
                 if not success:
-                    error_msg = f"Unrecognized date format: {new_expiry_str}"
+                    error_msg = f"无法解析日期格式: {new_expiry_str}"
             except Exception as e:
-                error_msg = f"Date parsing error: {e}"
+                error_msg = f"日期解析错误: {e}"
         else:
-            if new_expiry_str == old_expiry_str:
-                error_msg = "Expiry date unchanged – renewal might have failed"
-            else:
-                error_msg = "Could not find expiry date after renewal"
+            error_msg = "未能获取新的过期日期"
 
         if not success and not error_msg:
-            error_msg = "Renewal failed (unknown reason)"
+            error_msg = "续期失败（未知原因）"
 
         if not success:
             screenshot_step(sb, "renewal_failed")
@@ -480,7 +483,7 @@ def perform_renewal_with_browser():
 # ==================== cron-job.org 调度 ====================
 def ensure_cronjob():
     if not CRONJOB_API_KEY or not GH_TOKEN:
-        print("Missing CRONJOB_API_KEY or GH_TOKEN, skip cronjob setup.")
+        print("缺少 CRONJOB_API_KEY 或 GH_TOKEN，跳过 cron-job 设置")
         return
     trigger_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/workflows/{WORKFLOW_FILE}/dispatches"
     headers = {
@@ -505,11 +508,11 @@ def ensure_cronjob():
     if CRONJOB_JOB_ID:
         url = f"{api_base}/jobs/{CRONJOB_JOB_ID}"
         method = "PUT"
-        print(f"Updating cron-job {CRONJOB_JOB_ID}")
+        print(f"更新 cron-job {CRONJOB_JOB_ID}")
     else:
         url = f"{api_base}/jobs"
         method = "POST"
-        print("Creating new cron-job")
+        print("创建新 cron-job")
     auth = {"Authorization": f"Bearer {CRONJOB_API_KEY}"}
     try:
         r = requests.request(method, url, json=job_data, headers=auth, timeout=20)
@@ -518,12 +521,12 @@ def ensure_cronjob():
         if not CRONJOB_JOB_ID:
             new_id = result.get("id") or result.get("job_id")
             if new_id:
-                print(f"Created cron-job with ID {new_id}")
-                print("Please save this ID as CRONJOB_JOB_ID secret.")
+                print(f"已创建 cron-job，ID: {new_id}")
+                print("请将此 ID 保存为 CRONJOB_JOB_ID 环境变量")
         else:
-            print("Cron-job updated successfully.")
+            print("cron-job 已更新")
     except Exception as e:
-        print(f"Failed to manage cron-job: {e}")
+        print(f"管理 cron-job 失败: {e}")
 
 # ==================== 主入口 ====================
 def main():
