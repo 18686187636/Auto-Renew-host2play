@@ -13,6 +13,7 @@ from datetime import datetime
 import pytz
 from PIL import Image
 from seleniumbase import SB
+from selenium.webdriver.common.action_chains import ActionChains
 
 # ==================== 环境变量 ====================
 RENEW_URL = "https://host2play.gratis/server/renew?i=51b0dc2e-b901-46bf-b47a-20f5e6051459"
@@ -116,7 +117,7 @@ def solve_recaptcha_via_acedata(image_data, question_code):
         raise Exception("API 返回成功但无 objects 字段")
     return objects, solution.get("size", 300)
 
-# ==================== 优化后的 click_recaptcha_grid（使用 uc_click_at） ====================
+# ==================== 改进后的 click_recaptcha_grid（使用 ActionChains） ====================
 def click_recaptcha_grid(sb, objects, grid_size=300):
     try:
         iframes = sb.find_elements('iframe')
@@ -158,6 +159,7 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
     if not img_elem:
         raise Exception("Could not find image element in image challenge iframe")
 
+    # 获取图片位置和尺寸
     location = img_elem.location
     size = img_elem.size
     left = location['x']
@@ -170,20 +172,27 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
     cell_w = width / cols
     cell_h = height / rows
 
-    # 获取视口滚动偏移
+    # 获取页面滚动偏移
     scroll_x = sb.execute_script("return window.scrollX;")
     scroll_y = sb.execute_script("return window.scrollY;")
+
+    actions = ActionChains(sb.driver)
 
     for idx in objects:
         row = idx // cols
         col = idx % cols
+        # 计算绝对坐标（相对于页面左上角）
         x = left + col * cell_w + cell_w / 2
         y = top + row * cell_h + cell_h / 2
+        # 转换为视口坐标（相对于浏览器可视区域）
         viewport_x = x - scroll_x
         viewport_y = y - scroll_y
         print(f"🔘 点击索引 {idx} 于视口坐标 ({viewport_x:.0f}, {viewport_y:.0f})")
-        # 使用 uc_click_at 确保点击稳定
-        sb.uc_click_at(viewport_x, viewport_y)
+
+        # 使用 ActionChains 移动到该坐标并点击
+        actions.move_by_offset(viewport_x, viewport_y).click().perform()
+        # 重置鼠标位置，避免累积偏移
+        actions.move_by_offset(-viewport_x, -viewport_y).perform()
         time.sleep(0.5)
 
     sb.switch_to_default_content()
@@ -672,7 +681,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "api_failed")
             return False, None, error_msg, server_name
 
-        # ========== 6. 点击网格（使用 uc_click_at） ==========
+        # ========== 6. 点击网格（使用 ActionChains） ==========
         try:
             click_recaptcha_grid(sb, objects, grid_size)
             print("✅ 网格点击完成")
@@ -686,7 +695,6 @@ def perform_renewal_with_browser():
         # ========== 7. 点击 "Verify" 按钮 ==========
         print("🔘 尝试点击 'Verify' 按钮...")
         verify_clicked = False
-        # 方法1: 使用 SeleniumBase 的点击
         try:
             sb.click('button:contains("Verify")', timeout=3)
             verify_clicked = True
@@ -694,7 +702,6 @@ def perform_renewal_with_browser():
         except:
             pass
 
-        # 方法2: 使用 JavaScript
         if not verify_clicked:
             try:
                 sb.execute_script("""
@@ -868,7 +875,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal (uc_click_at + Verify button)")
+    print("🚀 Starting Host2Play renewal (ActionChains + Verify button)")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
