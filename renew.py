@@ -27,8 +27,8 @@ REPO_OWNER = os.getenv("REPO_OWNER")
 REPO_NAME = os.getenv("REPO_NAME")
 WORKFLOW_FILE = os.getenv("WORKFLOW_FILE", "renew.yml")
 BRANCH = os.getenv("BRANCH", "main")
-PROXY = os.getenv("PROXY")
-CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")  # Ace Data Cloud Token
+PROXY = os.getenv("PROXY")  # socks5://127.0.0.1:1080
+CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")
 
 # ==================== 辅助函数 ====================
 def send_tg_message(text):
@@ -55,9 +55,11 @@ def commit_expiry_file():
     os.system('git push')
 
 def screenshot_step(sb, name):
+    """截图并保存为 step_{name}_{timestamp}.png"""
     ts = int(time.time() * 1000)
-    sb.save_screenshot(f"step_{name}_{ts}.png")
-    print(f"📸 Screenshot: step_{name}_{ts}.png")
+    filename = f"step_{name}_{ts}.png"
+    sb.save_screenshot(filename)
+    print(f"📸 Screenshot: {filename}")
 
 def get_current_ip(proxy=None):
     proxies = None
@@ -258,6 +260,7 @@ def perform_renewal_with_browser():
                 "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
             })
             print("✅ UA 已设置")
+            screenshot_step(sb, "ua_set")
         except Exception as e:
             print(f"⚠️ UA 设置失败: {e}")
 
@@ -272,6 +275,7 @@ def perform_renewal_with_browser():
                 """
             })
             print("✅ 反检测注入")
+            screenshot_step(sb, "anti_detect")
         except Exception as e:
             print(f"⚠️ 注入失败: {e}")
 
@@ -290,6 +294,7 @@ def perform_renewal_with_browser():
             return False, None, error_msg, server_name
         else:
             print("✅ 页面正常")
+            screenshot_step(sb, "page_normal")
 
         # ========== 1. Consent ==========
         try:
@@ -307,13 +312,16 @@ def perform_renewal_with_browser():
                     sb.click(selector, timeout=2)
                     print("✅ 已点击 Consent")
                     sb.sleep(1)
+                    screenshot_step(sb, "consent_clicked")
                     break
                 except:
                     continue
             else:
                 print("ℹ️ 无 Consent")
+                screenshot_step(sb, "no_consent")
         except Exception as e:
             print(f"⚠️ Consent 处理失败: {e}")
+            screenshot_step(sb, "consent_error")
 
         # ---------- 点击 Renew 函数 ----------
         def click_renew():
@@ -328,12 +336,14 @@ def perform_renewal_with_browser():
                 try:
                     sb.uc_click(selector, timeout=3)
                     print(f"✅ 点击 Renew (selector: {selector})")
+                    screenshot_step(sb, "renew_clicked")
                     return True
                 except:
                     continue
             try:
                 sb.execute_script("renew();")
                 print("✅ 通过 JS 点击 Renew")
+                screenshot_step(sb, "renew_js")
                 return True
             except:
                 pass
@@ -346,6 +356,7 @@ def perform_renewal_with_browser():
             return null;
         """)
         print(f"🔑 sitekey: {sitekey}")
+        screenshot_step(sb, "sitekey")
 
         # ========== 3. 第一次点击 Renew（触发验证） ==========
         print("🔘 第一次点击 Renew...")
@@ -354,6 +365,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "renew_click_failed")
             return False, None, error_msg, server_name
         time.sleep(3)
+        screenshot_step(sb, "after_first_renew")
 
         # ========== 4. 手动勾选复选框 ==========
         print("🔘 手动勾选 reCAPTCHA 复选框...")
@@ -365,19 +377,59 @@ def perform_renewal_with_browser():
             print("✅ 已勾选")
             sb.switch_to_default_content()
             time.sleep(3)
+            screenshot_step(sb, "checkbox_checked")
         except Exception as e:
             print(f"⚠️ 勾选失败: {e}")
             sb.switch_to_default_content()
+            screenshot_step(sb, "checkbox_error")
 
         # ========== 5. 等待图像验证出现 ==========
         print("⏳ 等待图像验证加载...")
-        time.sleep(8)
-        screenshot_step(sb, "after_checkbox")
+        image_loaded = False
+        for attempt in range(12):
+            time.sleep(2)
+            try:
+                sb.switch_to_frame('iframe[src*="recaptcha"]')
+                img = sb.find_element('img', timeout=1)
+                if img:
+                    print("✅ 图像验证已加载")
+                    image_loaded = True
+                    sb.switch_to_default_content()
+                    break
+            except:
+                sb.switch_to_default_content()
+                continue
+
+        if not image_loaded:
+            print("⚠️ 图像验证未自动出现，尝试重新触发...")
+            click_renew()
+            time.sleep(5)
+            for attempt in range(6):
+                time.sleep(2)
+                try:
+                    sb.switch_to_frame('iframe[src*="recaptcha"]')
+                    img = sb.find_element('img', timeout=1)
+                    if img:
+                        print("✅ 重新触发后图像验证加载")
+                        image_loaded = True
+                        sb.switch_to_default_content()
+                        break
+                except:
+                    sb.switch_to_default_content()
+                    continue
+
+        if not image_loaded:
+            error_msg = "图像验证未能加载，可能被拦截或网络问题"
+            screenshot_step(sb, "image_not_loaded")
+            return False, None, error_msg, server_name
+
+        screenshot_step(sb, "image_loaded")
 
         # ========== 6. 提取问题文本 ==========
         try:
             question_code = extract_question_from_page(sb)
             print(f"🧩 Question code: {question_code}")
+            screenshot_step(sb, "question_extracted")
         except Exception as e:
             error_msg = f"提取问题失败: {e}"
             screenshot_step(sb, "question_failed")
@@ -387,6 +439,7 @@ def perform_renewal_with_browser():
         try:
             captcha_img = capture_recaptcha_image(sb)
             print("📸 图像已截取")
+            screenshot_step(sb, "capture_done")
         except Exception as e:
             error_msg = f"截取图像失败: {e}"
             screenshot_step(sb, "capture_failed")
@@ -396,6 +449,7 @@ def perform_renewal_with_browser():
         try:
             objects, grid_size = solve_recaptcha_via_acedata(captcha_img, question_code)
             print(f"🧩 需要点击的索引: {objects}")
+            screenshot_step(sb, "api_success")
         except Exception as e:
             error_msg = f"识别失败: {e}"
             screenshot_step(sb, "api_failed")
@@ -406,6 +460,7 @@ def perform_renewal_with_browser():
             click_recaptcha_grid(sb, objects, grid_size)
             print("✅ 网格点击完成")
             time.sleep(3)
+            screenshot_step(sb, "grid_clicked")
         except Exception as e:
             error_msg = f"点击网格失败: {e}"
             screenshot_step(sb, "click_grid_failed")
@@ -444,6 +499,7 @@ def perform_renewal_with_browser():
             except:
                 continue
         print(f"📅 新到期时间: {new_expiry_str}")
+        screenshot_step(sb, "expiry_found")
 
         if new_expiry_str:
             try:
@@ -520,7 +576,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal (Image Recognition)")
+    print("🚀 Starting Host2Play renewal (Image Recognition with Full Screenshots)")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
