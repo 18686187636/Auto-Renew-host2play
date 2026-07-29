@@ -113,7 +113,8 @@ def ensure_cronjob():
         "enabled": True
     }
 
-    api_base = "https://api.cron-job.org/v1"
+    # 修复：API 基础 URL 应为 https://api.cron-job.org（不含 /v1）
+    api_base = "https://api.cron-job.org"
     auth = {"Authorization": f"Bearer {CRONJOB_API_KEY}"}
 
     if CRONJOB_JOB_ID:
@@ -135,8 +136,6 @@ def ensure_cronjob():
         if not CRONJOB_JOB_ID and job_id:
             log(f"✅ cron-job 创建成功，ID: {job_id}")
             log("💡 请将 CRONJOB_JOB_ID 添加到仓库 Secrets 中，以避免重复创建")
-            # 可以在此处自动将 job_id 写入环境变量（但 Actions 中无法持久化，仅提示）
-            # 可以发送 Telegram 通知提醒
             send_tg_message(
                 TG_BOT_TOKEN, TG_CHAT_ID,
                 f"🆕 cron-job 已创建，ID: `{job_id}`\n请将此 ID 添加到 GitHub Secrets 的 CRONJOB_JOB_ID"
@@ -858,6 +857,9 @@ def renew_single_url(url, attempt_idx: int = 0):
 
 # ==================== 主入口 ====================
 def main():
+    # 首先确保 cron-job.org 任务存在（放在最前面）
+    ensure_cronjob()
+
     if not RENEW_URLS:
         log("请在 RENEW_URLS 列表中添加续期链接", "ERROR")
         sys.exit(1)
@@ -876,8 +878,6 @@ def main():
         if success:
             caption = build_notification(True, url, server_name, old_expire, new_expire)
             total_success += 1
-            # 续期成功后，确保 cron-job.org 定时任务存在（创建或更新）
-            ensure_cronjob()
         else:
             caption = build_notification(
                 False, url, server_name, old_expire, failure_reason=failure_reason
