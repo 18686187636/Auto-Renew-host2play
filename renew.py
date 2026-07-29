@@ -281,7 +281,7 @@ def perform_renewal_with_browser():
         sb.sleep(8)
         screenshot_step(sb, "page_loaded")
 
-        # ---- 检测 Cloudflare 拦截（仅看标题） ----
+        # ---- 检测 Cloudflare 拦截 ----
         title = sb.get_title()
         if "Just a moment" in title or "524" in title:
             error_msg = "Cloudflare 拦截，请更换代理"
@@ -290,7 +290,7 @@ def perform_renewal_with_browser():
         else:
             print("✅ 页面正常加载")
 
-        # ========== 1. 点击 Consent 按钮 ==========
+        # ========== 1. 点击 Consent ==========
         try:
             consent_selectors = [
                 'button:contains("Consent")',
@@ -314,58 +314,56 @@ def perform_renewal_with_browser():
         except Exception as e:
             print(f"⚠️ 处理 Consent 时出错（忽略）: {e}")
 
-        # ========== 2. 点击 Renew server 按钮（触发 reCAPTCHA） ==========
-        print("🔘 点击 Renew server 按钮...")
-        clicked = False
-        btn_selectors = [
-            'button.btn-primary:contains("Renew")',
-            'button:contains("Renew server")',
-            'button:contains("Renew")',
-            'button[onclick*="renew()"]',
-            '.btn-primary:contains("Renew")'
-        ]
-        for selector in btn_selectors:
-            try:
-                sb.uc_click(selector, timeout=3)
-                clicked = True
-                print(f"✅ 已点击 Renew 按钮 (selector: {selector})")
-                break
-            except:
-                continue
-        if not clicked:
+        # ---------- 定义 Renew 按钮点击函数 ----------
+        def click_renew():
+            btn_selectors = [
+                'button.btn-primary:contains("Renew")',
+                'button:contains("Renew server")',
+                'button:contains("Renew")',
+                'button[onclick*="renew()"]',
+                '.btn-primary:contains("Renew")'
+            ]
+            for selector in btn_selectors:
+                try:
+                    sb.uc_click(selector, timeout=3)
+                    print(f"✅ 点击 Renew 按钮 (selector: {selector})")
+                    return True
+                except:
+                    continue
             try:
                 sb.execute_script("renew();")
-                clicked = True
                 print("✅ 通过 JavaScript 点击 Renew 按钮")
+                return True
             except:
                 pass
-        if not clicked:
+            return False
+
+        # ========== 2. 第一次点击 Renew（触发复选框） ==========
+        print("🔘 第一次点击 Renew server 按钮...")
+        if not click_renew():
             error_msg = "无法点击 Renew 按钮"
             screenshot_step(sb, "renew_click_failed")
             return False, None, error_msg, server_name
+        time.sleep(3)
 
-        # ---- 等待 reCAPTCHA 出现 ----
-        print("⏳ 等待 reCAPTCHA 加载...")
-        time.sleep(5)
-
-        # ========== 3. 点击 reCAPTCHA 复选框 ==========
+        # ========== 3. 勾选 reCAPTCHA 复选框 ==========
         try:
             recaptcha_checkbox = sb.find_element('.g-recaptcha', timeout=5)
             if recaptcha_checkbox:
                 sb.uc_click('.g-recaptcha')
-                print("✅ 点击 reCAPTCHA 复选框")
-                time.sleep(5)
+                print("✅ 已勾选 I'm not a robot 复选框")
+                time.sleep(3)
             else:
                 print("⚠️ 未找到 reCAPTCHA 复选框，可能已通过验证")
         except Exception as e:
-            print(f"⚠️ 点击 reCAPTCHA 复选框失败: {e}")
-            # 如果失败，可能之前已验证，继续尝试
+            print(f"⚠️ 点击复选框失败: {e}")
 
-        print("⏳ 等待 reCAPTCHA 图像加载...")
+        # ========== 4. 等待图像验证加载 ==========
+        print("⏳ 等待图像验证加载...")
         time.sleep(8)
-        screenshot_step(sb, "after_recaptcha_click")
+        screenshot_step(sb, "after_checkbox")
 
-        # ========== 4. 提取问题并打码 ==========
+        # ========== 5. 提取问题并打码 ==========
         try:
             question_code = extract_question_from_page(sb)
             print(f"🧩 Question code: {question_code}")
@@ -393,37 +391,21 @@ def perform_renewal_with_browser():
         try:
             click_recaptcha_grid(sb, objects, grid_size)
             print("✅ 已点击 reCAPTCHA 网格")
-            time.sleep(2)
+            time.sleep(3)
         except Exception as e:
             error_msg = f"点击网格失败: {e}"
             screenshot_step(sb, "click_grid_failed")
             return False, None, error_msg, server_name
 
         # ---- 等待验证完成 ----
-        print("⏳ 等待验证完成...")
+        print("⏳ 等待验证通过...")
         time.sleep(5)
 
-        # ========== 5. 再次点击 Renew 按钮（提交续期） ==========
-        print("🔘 再次点击 Renew 按钮以提交续期...")
-        clicked = False
-        for selector in btn_selectors:
-            try:
-                sb.uc_click(selector, timeout=3)
-                clicked = True
-                print(f"✅ 点击提交 (selector: {selector})")
-                break
-            except:
-                continue
-        if not clicked:
-            try:
-                sb.execute_script("renew();")
-                clicked = True
-                print("✅ 通过 JavaScript 提交续期")
-            except:
-                pass
-        if not clicked:
-            error_msg = "无法点击提交按钮"
-            screenshot_step(sb, "submit_failed")
+        # ========== 6. 第二次点击 Renew（提交续期） ==========
+        print("🔘 第二次点击 Renew server 按钮（提交续期）...")
+        if not click_renew():
+            error_msg = "第二次点击 Renew 失败"
+            screenshot_step(sb, "second_renew_failed")
             return False, None, error_msg, server_name
 
         screenshot_step(sb, "after_submit")
@@ -437,8 +419,7 @@ def perform_renewal_with_browser():
         sb.sleep(5)
         screenshot_step(sb, "after_reload")
 
-        # ========== 6. 提取过期日期 ==========
-        old_expiry_str = None   # 这里我们不需要比较，直接取新的
+        # ========== 7. 提取过期日期 ==========
         new_expiry_str = None
         expiry_selectors = ['#expireDate', '.expiry-date', 'span:contains("Expires")', 'div:contains("Expires")']
         for sel in expiry_selectors:
@@ -456,7 +437,6 @@ def perform_renewal_with_browser():
 
         if new_expiry_str:
             try:
-                # 尝试多种格式
                 for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
                     try:
                         expiry_dt = datetime.strptime(new_expiry_str, fmt)
