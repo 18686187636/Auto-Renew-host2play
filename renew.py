@@ -104,7 +104,6 @@ def solve_recaptcha_via_acedata(image_data, question_code):
         result = resp.json()
     except:
         raise Exception(f"API 返回非 JSON 响应: {resp.text[:200]}")
-    # 检查是否包含 solution 和 objects（API 没有 success 字段）
     solution = result.get("solution")
     if not solution:
         error = result.get("error")
@@ -182,7 +181,9 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
 
     sb.switch_to_default_content()
 
+# ==================== 增强版 extract_question_from_page（支持多语言） ====================
 def extract_question_from_page(sb):
+    # 方法1：传统方式
     try:
         elem = sb.find_element('.rc-imageselect-instructions', timeout=3)
         if elem:
@@ -209,9 +210,17 @@ def extract_question_from_page(sb):
     except:
         pass
 
+    # 方法2：JavaScript 搜索关键词（支持多语言）
     js_code = """
     function findQuestion() {
-        var keywords = ['选择', '点击', '图片', '图像', '包含', '所有', '请选择', '请点击', 'select', 'click', 'image'];
+        var keywords = ['选择', '点击', '图片', '图像', '包含', '所有', '请选择', '请点击', 
+                        'select', 'click', 'image', 'squares', 'with', 'crosswalks', 'bicycles',
+                        'traffic lights', 'cars', 'motorcycles', 'buses', 'trucks', 'fire hydrant',
+                        'boats', 'bridges', 'mountains', 'stairs', 'chimneys', 'palm trees',
+                        'parking meters', 'school buses', 'tractors',
+                        'selectați', 'autobuze', 'trotuare', 'semafoare', 'mașini', 'motoare',
+                        'camioane', 'hidrant', 'bărci', 'poduri', 'munți', 'scări', 'coșuri',
+                        'palmieri', 'parcometre', 'autobuze școlare', 'tractoare'];
         var texts = [];
 
         var bodyText = document.body.innerText || '';
@@ -480,41 +489,66 @@ def perform_renewal_with_browser():
         time.sleep(3)
         screenshot_step(sb, "after_first_renew")
 
-        print("🔘 手动勾选 reCAPTCHA 复选框...")
+        # ========== 2. 勾选复选框（遍历所有 iframe） ==========
+        print("🔘 手动勾选 reCAPTCHA 复选框（遍历 iframe）...")
+        checkbox_clicked = False
         try:
-            sb.wait_for_element('iframe[src*="recaptcha"]', timeout=10)
-            sb.switch_to_frame('iframe[src*="recaptcha"]')
-            sb.wait_for_element('#recaptcha-anchor', timeout=5)
-            sb.click('#recaptcha-anchor')
-            print("✅ 已勾选")
-            sb.switch_to_default_content()
-            time.sleep(3)
-            screenshot_step(sb, "checkbox_checked")
+            # 获取所有 iframe
+            iframes = sb.find_elements('iframe')
+            for iframe in iframes:
+                sb.switch_to_frame(iframe)
+                try:
+                    # 尝试查找复选框锚点
+                    anchor = sb.find_element('#recaptcha-anchor', timeout=1)
+                    if anchor:
+                        sb.click('#recaptcha-anchor')
+                        print("✅ 已勾选复选框")
+                        checkbox_clicked = True
+                        sb.switch_to_default_content()
+                        break
+                except:
+                    sb.switch_to_default_content()
+                    continue
         except Exception as e:
-            print(f"⚠️ 勾选失败: {e}")
+            print(f"⚠️ 遍历 iframe 勾选失败: {e}")
             sb.switch_to_default_content()
-            screenshot_step(sb, "checkbox_error")
-            try:
-                print("🔄 尝试 CDP 点击复选框...")
-                sb.cdp.gui_click_element('#recaptcha-anchor')
-                print("✅ CDP 点击成功")
-                screenshot_step(sb, "checkbox_cdp")
-            except Exception as e2:
-                print(f"❌ CDP 点击也失败: {e2}")
 
+        # 如果遍历失败，尝试通过 src 选择器（备用）
+        if not checkbox_clicked:
+            try:
+                sb.switch_to_frame('iframe[src*="recaptcha"]')
+                sb.wait_for_element('#recaptcha-anchor', timeout=5)
+                sb.click('#recaptcha-anchor')
+                print("✅ 通过 src 选择器勾选成功")
+                checkbox_clicked = True
+                sb.switch_to_default_content()
+            except Exception as e:
+                print(f"⚠️ src 选择器勾选失败: {e}")
+                sb.switch_to_default_content()
+
+        if not checkbox_clicked:
+            print("❌ 无法勾选复选框，尝试继续（可能已经勾选）")
+            screenshot_step(sb, "checkbox_error")
+        else:
+            screenshot_step(sb, "checkbox_checked")
+            time.sleep(3)
+
+        # ========== 3. 等待并提取问题文本 ==========
         print("⏳ 等待图像验证并提取问题...")
         print(f"📄 当前页面标题: {sb.get_title()}")
         print(f"🔗 当前 URL: {sb.get_current_url()}")
         screenshot_step(sb, "before_extract")
 
         question_code = None
-        max_attempts = 8
+        max_attempts = 10
         for attempt in range(max_attempts):
             try:
                 question_text = extract_question_from_page(sb)
                 print(f"🧩 提取到的问题文本: {question_text}")
 
-                question_map_en = {
+                # 多语言映射（英文、中文、罗马尼亚语）
+                question_map = {
+                    # English
                     "traffic lights": "/m/015qff",
                     "crosswalks": "/m/014xcs",
                     "bicycles": "/m/0199g",
@@ -533,41 +567,53 @@ def perform_renewal_with_browser():
                     "parking meters": "/m/015qbp",
                     "school buses": "/m/02yvhj",
                     "tractors": "/m/013xlm",
+                    # Chinese
+                    "出租车": "/m/0pg52",
+                    "巴士": "/m/01bjv",
+                    "校车": "/m/02yvhj",
+                    "摩托车": "/m/04_sv",
+                    "拖拉机": "/m/013xlm",
+                    "烟囱": "/m/01jk_4",
+                    "人行横道": "/m/014xcs",
+                    "红绿灯": "/m/015qff",
+                    "自行车": "/m/0199g",
+                    "停车计价表": "/m/015qbp",
+                    "汽车": "/m/0k4j",
+                    "桥": "/m/015kr",
+                    "船": "/m/019jd",
+                    "棕榈树": "/m/0cdl1",
+                    "山": "/m/09d_r",
+                    "消防栓": "/m/01pns0",
+                    "楼梯": "/m/01lynh",
+                    # Romanian (罗马尼亚语)
+                    "semafoare": "/m/015qff",
+                    "trotuare": "/m/014xcs",
+                    "biciclete": "/m/0199g",
+                    "mașini": "/m/0k4j",
+                    "motoare": "/m/04_sv",
+                    "autobuze": "/m/01bjv",
+                    "camioane": "/m/07jdr",
+                    "hidrant": "/m/01pns0",
+                    "bărci": "/m/019jd",
+                    "poduri": "/m/015kr",
+                    "munți": "/m/09d_r",
+                    "scări": "/m/01lynh",
+                    "coșuri": "/m/01jk_4",
+                    "palmieri": "/m/0cdl1",
+                    "parcometre": "/m/015qbp",
+                    "autobuze școlare": "/m/02yvhj",
+                    "tractoare": "/m/013xlm"
                 }
 
                 question_code = None
                 question_lower = question_text.lower()
-                for key, code in question_map_en.items():
+                for key, code in question_map.items():
                     if key in question_lower:
                         question_code = code
                         break
 
                 if not question_code:
-                    question_map_cn = {
-                        "出租车": "/m/0pg52",
-                        "巴士": "/m/01bjv",
-                        "校车": "/m/02yvhj",
-                        "摩托车": "/m/04_sv",
-                        "拖拉机": "/m/013xlm",
-                        "烟囱": "/m/01jk_4",
-                        "人行横道": "/m/014xcs",
-                        "红绿灯": "/m/015qff",
-                        "自行车": "/m/0199g",
-                        "停车计价表": "/m/015qbp",
-                        "汽车": "/m/0k4j",
-                        "桥": "/m/015kr",
-                        "船": "/m/019jd",
-                        "棕榈树": "/m/0cdl1",
-                        "山": "/m/09d_r",
-                        "消防栓": "/m/01pns0",
-                        "楼梯": "/m/01lynh"
-                    }
-                    for cn, code in question_map_cn.items():
-                        if cn in question_text:
-                            question_code = code
-                            break
-
-                if not question_code:
+                    # 尝试从文本中提取 /m/ 代码
                     match = re.search(r'/m/[a-z0-9]+', question_text)
                     if match:
                         question_code = match.group(0)
@@ -581,7 +627,7 @@ def perform_renewal_with_browser():
             except Exception as e:
                 print(f"尝试 {attempt+1}/{max_attempts} 提取失败: {e}")
                 time.sleep(2)
-                if attempt == 3:
+                if attempt == 4:
                     print("⚠️ 尝试重新触发验证...")
                     click_renew()
                     time.sleep(3)
@@ -591,6 +637,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "question_failed")
             return False, None, error_msg, server_name
 
+        # ========== 4. 截取验证图像 ==========
         try:
             captcha_img = capture_recaptcha_image(sb)
             print("📸 图像已截取")
@@ -600,6 +647,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "capture_failed")
             return False, None, error_msg, server_name
 
+        # ========== 5. 调用 API 识别 ==========
         try:
             objects, grid_size = solve_recaptcha_via_acedata(captcha_img, question_code)
             print(f"🧩 需要点击的索引: {objects}")
@@ -609,6 +657,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "api_failed")
             return False, None, error_msg, server_name
 
+        # ========== 6. 点击网格 ==========
         try:
             click_recaptcha_grid(sb, objects, grid_size)
             print("✅ 网格点击完成")
@@ -619,6 +668,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "click_grid_failed")
             return False, None, error_msg, server_name
 
+        # ========== 7. 第二次点击 Renew 提交 ==========
         print("🔘 第二次点击 Renew（提交续期）...")
         if not click_renew():
             error_msg = "第二次点击失败"
@@ -629,12 +679,14 @@ def perform_renewal_with_browser():
         print("⏳ 等待续期处理...")
         time.sleep(10)
 
+        # ---- 刷新页面 ----
         print("🔄 刷新页面...")
         sb.open(RENEW_URL)
         sb.wait_for_ready_state_complete()
         sb.sleep(5)
         screenshot_step(sb, "after_reload")
 
+        # ========== 8. 提取新到期时间 ==========
         new_expiry_str = None
         expiry_selectors = ['#expireDate', '.expiry-date', 'span:contains("Expires")', 'div:contains("Expires")']
         for sel in expiry_selectors:
@@ -726,7 +778,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal (xvfb mode with img/canvas support)")
+    print("🚀 Starting Host2Play renewal (final multi-language version)")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
