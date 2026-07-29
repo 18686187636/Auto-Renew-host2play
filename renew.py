@@ -116,7 +116,6 @@ def solve_recaptcha_via_acedata(image_data, question_code):
         raise Exception("API 返回成功但无 objects 字段")
     return objects, solution.get("size", 300)
 
-# ==================== 修复后的 click_recaptcha_grid（使用 sb.click_at） ====================
 def click_recaptcha_grid(sb, objects, grid_size=300):
     try:
         iframes = sb.find_elements('iframe')
@@ -170,7 +169,6 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
     cell_w = width / cols
     cell_h = height / rows
 
-    # 获取滚动偏移
     scroll_x = sb.execute_script("return window.scrollX;")
     scroll_y = sb.execute_script("return window.scrollY;")
 
@@ -179,7 +177,6 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
         col = idx % cols
         x = left + col * cell_w + cell_w / 2
         y = top + row * cell_h + cell_h / 2
-        # 转换为视口坐标
         viewport_x = x - scroll_x
         viewport_y = y - scroll_y
         print(f"🔘 Clicking index {idx} at ({viewport_x:.0f}, {viewport_y:.0f})")
@@ -188,7 +185,6 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
 
     sb.switch_to_default_content()
 
-# ==================== 增强版 extract_question_from_page（支持多语言） ====================
 def extract_question_from_page(sb):
     try:
         elem = sb.find_element('.rc-imageselect-instructions', timeout=3)
@@ -548,26 +544,43 @@ def perform_renewal_with_browser():
                 question_text = extract_question_from_page(sb)
                 print(f"🧩 提取到的问题文本: {question_text}")
 
+                # ========== 完整映射（含单复数、中英罗） ==========
                 question_map = {
                     # English
                     "traffic lights": "/m/015qff",
+                    "traffic light": "/m/015qff",
                     "crosswalks": "/m/014xcs",
+                    "crosswalk": "/m/014xcs",
                     "bicycles": "/m/0199g",
+                    "bicycle": "/m/0199g",
                     "cars": "/m/0k4j",
+                    "car": "/m/0k4j",
                     "motorcycles": "/m/04_sv",
+                    "motorcycle": "/m/04_sv",
                     "buses": "/m/01bjv",
+                    "bus": "/m/01bjv",
                     "trucks": "/m/07jdr",
+                    "truck": "/m/07jdr",
                     "fire hydrant": "/m/01pns0",
                     "fire hydrants": "/m/01pns0",
                     "boats": "/m/019jd",
+                    "boat": "/m/019jd",
                     "bridges": "/m/015kr",
+                    "bridge": "/m/015kr",
                     "mountains": "/m/09d_r",
+                    "mountain": "/m/09d_r",
                     "stairs": "/m/01lynh",
+                    "stair": "/m/01lynh",
                     "chimneys": "/m/01jk_4",
+                    "chimney": "/m/01jk_4",
                     "palm trees": "/m/0cdl1",
+                    "palm tree": "/m/0cdl1",
                     "parking meters": "/m/015qbp",
+                    "parking meter": "/m/015qbp",
                     "school buses": "/m/02yvhj",
+                    "school bus": "/m/02yvhj",
                     "tractors": "/m/013xlm",
+                    "tractor": "/m/013xlm",
                     # Chinese
                     "出租车": "/m/0pg52",
                     "巴士": "/m/01bjv",
@@ -778,7 +791,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal (final version with fixed click)")
+    print("🚀 Starting Host2Play renewal (final with complete mappings)")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
