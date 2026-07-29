@@ -116,6 +116,7 @@ def solve_recaptcha_via_acedata(image_data, question_code):
         raise Exception("API 返回成功但无 objects 字段")
     return objects, solution.get("size", 300)
 
+# ==================== 修复后的 click_recaptcha_grid（使用 sb.click_at） ====================
 def click_recaptcha_grid(sb, objects, grid_size=300):
     try:
         iframes = sb.find_elements('iframe')
@@ -169,21 +170,26 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
     cell_w = width / cols
     cell_h = height / rows
 
-    actions = sb.driver.action_chains
+    # 获取滚动偏移
+    scroll_x = sb.execute_script("return window.scrollX;")
+    scroll_y = sb.execute_script("return window.scrollY;")
+
     for idx in objects:
         row = idx // cols
         col = idx % cols
         x = left + col * cell_w + cell_w / 2
         y = top + row * cell_h + cell_h / 2
-        print(f"🔘 Clicking index {idx} at ({x:.0f}, {y:.0f})")
-        actions.move_by_offset(x, y).click().perform()
+        # 转换为视口坐标
+        viewport_x = x - scroll_x
+        viewport_y = y - scroll_y
+        print(f"🔘 Clicking index {idx} at ({viewport_x:.0f}, {viewport_y:.0f})")
+        sb.click_at(viewport_x, viewport_y)
         time.sleep(0.5)
 
     sb.switch_to_default_content()
 
 # ==================== 增强版 extract_question_from_page（支持多语言） ====================
 def extract_question_from_page(sb):
-    # 方法1：传统方式
     try:
         elem = sb.find_element('.rc-imageselect-instructions', timeout=3)
         if elem:
@@ -210,7 +216,6 @@ def extract_question_from_page(sb):
     except:
         pass
 
-    # 方法2：JavaScript 搜索关键词（支持多语言）
     js_code = """
     function findQuestion() {
         var keywords = ['选择', '点击', '图片', '图像', '包含', '所有', '请选择', '请点击', 
@@ -493,12 +498,10 @@ def perform_renewal_with_browser():
         print("🔘 手动勾选 reCAPTCHA 复选框（遍历 iframe）...")
         checkbox_clicked = False
         try:
-            # 获取所有 iframe
             iframes = sb.find_elements('iframe')
             for iframe in iframes:
                 sb.switch_to_frame(iframe)
                 try:
-                    # 尝试查找复选框锚点
                     anchor = sb.find_element('#recaptcha-anchor', timeout=1)
                     if anchor:
                         sb.click('#recaptcha-anchor')
@@ -513,7 +516,6 @@ def perform_renewal_with_browser():
             print(f"⚠️ 遍历 iframe 勾选失败: {e}")
             sb.switch_to_default_content()
 
-        # 如果遍历失败，尝试通过 src 选择器（备用）
         if not checkbox_clicked:
             try:
                 sb.switch_to_frame('iframe[src*="recaptcha"]')
@@ -546,7 +548,6 @@ def perform_renewal_with_browser():
                 question_text = extract_question_from_page(sb)
                 print(f"🧩 提取到的问题文本: {question_text}")
 
-                # 多语言映射（英文、中文、罗马尼亚语）
                 question_map = {
                     # English
                     "traffic lights": "/m/015qff",
@@ -585,7 +586,7 @@ def perform_renewal_with_browser():
                     "山": "/m/09d_r",
                     "消防栓": "/m/01pns0",
                     "楼梯": "/m/01lynh",
-                    # Romanian (罗马尼亚语)
+                    # Romanian
                     "semafoare": "/m/015qff",
                     "trotuare": "/m/014xcs",
                     "biciclete": "/m/0199g",
@@ -613,7 +614,6 @@ def perform_renewal_with_browser():
                         break
 
                 if not question_code:
-                    # 尝试从文本中提取 /m/ 代码
                     match = re.search(r'/m/[a-z0-9]+', question_text)
                     if match:
                         question_code = match.group(0)
@@ -778,7 +778,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal (final multi-language version)")
+    print("🚀 Starting Host2Play renewal (final version with fixed click)")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
