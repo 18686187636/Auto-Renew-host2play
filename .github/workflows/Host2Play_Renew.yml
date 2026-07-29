@@ -1,10 +1,7 @@
 name: Host2Play 续期
 
 on:
-  schedule:
-    - cron: '0 0,11,22 * * *'    # 触发点: 00:00, 11:00, 22:00
-    - cron: '30 5,16 * * *'      # 触发点: 05:30, 16:30
-  workflow_dispatch:
+  workflow_dispatch:  # 仅保留手动触发，由 cron-job.org 调用
 
 permissions:
   actions: write
@@ -55,8 +52,19 @@ jobs:
 
       - name: 执行续订
         env:
+          # 必填
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          CAPTCHA_API_KEY: ${{ secrets.CAPTCHA_API_KEY }}
+          CRONJOB_API_KEY: ${{ secrets.CRONJOB_API_KEY }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          REPO_OWNER: ${{ secrets.REPO_OWNER }}
+          REPO_NAME: ${{ secrets.REPO_NAME }}
+          # 可选（脚本有默认值）
+          CRONJOB_JOB_ID: ${{ secrets.CRONJOB_JOB_ID }}
+          WORKFLOW_FILE: ${{ secrets.WORKFLOW_FILE }}
+          BRANCH: ${{ secrets.BRANCH }}
+          AUDIO_API_URL: ${{ secrets.AUDIO_API_URL }}
         run: python main.py
 
       - name: 上传截图
