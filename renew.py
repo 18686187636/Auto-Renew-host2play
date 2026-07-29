@@ -209,45 +209,31 @@ def perform_renewal_with_browser():
                 pass
             return False
 
-        # ========== 2. 获取 sitekey ==========
-        sitekey = None
-        try:
-            # 方式1：从 .g-recaptcha 元素的 data-sitekey 获取
-            sitekey = sb.execute_script("""
-                var elem = document.querySelector('.g-recaptcha');
-                return elem ? elem.getAttribute('data-sitekey') : null;
-            """)
-            if sitekey:
-                print(f"🔑 获取到 sitekey: {sitekey}")
-            else:
-                # 方式2：从页面全局变量或脚本中提取
-                sitekey = sb.execute_script("""
-                    var scriptTags = document.getElementsByTagName('script');
-                    var sitekey = null;
-                    for (var i = 0; i < scriptTags.length; i++) {
-                        var src = scriptTags[i].src || '';
-                        if (src.indexOf('recaptcha/api.js') !== -1) {
-                            var match = src.match(/render=([^&]+)/);
-                            if (match) sitekey = match[1];
-                        }
-                    }
-                    return sitekey;
-                """)
-                if sitekey:
-                    print(f"🔑 从脚本中提取到 sitekey: {sitekey}")
-                else:
-                    # 方式3：硬编码常见 sitekey（如果站点固定）
-                    sitekey = "6Le-wvkSAAAAAPBMRTvw0Q4Muexq9bi0DJwx_mJ-"  # 示例，需实际验证
-                    print(f"⚠️ 使用硬编码 sitekey: {sitekey}")
-        except Exception as e:
-            error_msg = f"获取 sitekey 失败: {e}"
-            screenshot_step(sb, "sitekey_failed")
-            return False, None, error_msg, server_name
-
+        # ========== 2. 动态获取 sitekey ==========
+        sitekey = sb.execute_script("""
+            // 从 .g-recaptcha 的 data-sitekey 获取
+            var elem = document.querySelector('.g-recaptcha');
+            if (elem) return elem.getAttribute('data-sitekey');
+            // 尝试从页面脚本中提取
+            var scripts = document.getElementsByTagName('script');
+            for (var i=0; i<scripts.length; i++) {
+                var src = scripts[i].src || '';
+                if (src.indexOf('recaptcha/api.js') !== -1) {
+                    var match = src.match(/render=([^&]+)/);
+                    if (match) return match[1];
+                }
+                // 尝试从 innerHTML 中提取
+                var html = scripts[i].innerHTML || '';
+                var m = html.match(/sitekey['"]?\\s*[:=]\\s*['"]([^'"]+)['"]/);
+                if (m) return m[1];
+            }
+            return null;
+        """)
         if not sitekey:
-            error_msg = "无法获取 sitekey"
+            error_msg = "无法获取 sitekey，请检查页面是否包含 reCAPTCHA"
             screenshot_step(sb, "sitekey_failed")
             return False, None, error_msg, server_name
+        print(f"🔑 获取到 sitekey: {sitekey}")
 
         # ========== 3. 第一次点击 Renew（触发验证） ==========
         print("🔘 第一次点击 Renew server 按钮...")
@@ -267,34 +253,67 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "token_failed")
             return False, None, error_msg, server_name
 
-        # ========== 5. 注入 token 到页面 ==========
+        # ========== 5. 注入 token 并触发验证 ==========
         print("💉 注入 token...")
-        try:
-            # 填充隐藏域
+        inject_script = f"""
+            (function() {{
+                // 1. 填充 textarea
+                var textarea = document.getElementById('g-recaptcha-response');
+                if (textarea) {{
+                    textarea.value = '{token}';
+                    textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    textarea.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                }}
+
+                // 2. 触发回调（如果有）
+                if (typeof verifyCallback === 'function') {{
+                    verifyCallback('{token}');
+                }}
+                if (typeof onSuccess === 'function') {{
+                    onSuccess('{token}');
+                }}
+
+                // 3. 尝试调用 grecaptcha 的 callback
+                if (window.grecaptcha && grecaptcha.getResponse) {{
+                    // 部分页面通过 setResponse 私有方法，这里用不到
+                }}
+
+                // 4. 触发 .g-recaptcha 元素的事件
+                var recaptchaElem = document.querySelector('.g-recaptcha');
+                if (recaptchaElem) {{
+                    recaptchaElem.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    recaptchaElem.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                }}
+
+                // 5. 如果有 iframe，尝试通信（一般不需要）
+                return true;
+            }})();
+        """
+        sb.execute_script(inject_script)
+        print("✅ token 注入完成")
+        time.sleep(2)
+
+        # ---- 验证 token 是否填充成功 ----
+        token_filled = sb.execute_script("""
+            var textarea = document.getElementById('g-recaptcha-response');
+            return textarea ? textarea.value.length > 0 : false;
+        """)
+        if not token_filled:
+            print("⚠️ token 似乎未填充，尝试强制写入")
+            # 强制写入
             sb.execute_script(f"""
                 var textarea = document.getElementById('g-recaptcha-response');
                 if (textarea) {{
                     textarea.value = '{token}';
-                    textarea.innerHTML = '{token}';
-                    // 触发事件
-                    var event = new Event('input', {{ bubbles: true }});
-                    textarea.dispatchEvent(event);
-                }}
-                // 尝试调用回调（如果有）
-                if (typeof verifyCallback === 'function') {{
-                    verifyCallback('{token}');
-                }}
-                // 如果有 grecaptcha 对象，尝试执行回调
-                if (window.grecaptcha && grecaptcha.getResponse) {{
-                    // 如果 getResponse 返回空，说明未验证，但我们已经注入
+                    textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
                 }}
             """)
-            print("✅ token 已注入")
-            time.sleep(2)
-        except Exception as e:
-            error_msg = f"注入 token 失败: {e}"
-            screenshot_step(sb, "inject_failed")
-            return False, None, error_msg, server_name
+            time.sleep(1)
+        else:
+            print("✅ token 已填充到 textarea")
+
+        # 额外截图保存状态
+        screenshot_step(sb, "after_inject")
 
         # ========== 6. 第二次点击 Renew（提交续期） ==========
         print("🔘 第二次点击 Renew server 按钮（提交续期）...")
