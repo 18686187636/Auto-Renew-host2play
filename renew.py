@@ -678,49 +678,63 @@ def perform_renewal_with_browser():
         try:
             click_recaptcha_grid(sb, objects, grid_size)
             print("✅ 网格点击完成")
-            time.sleep(3)
+            time.sleep(2)
             screenshot_step(sb, "grid_clicked")
         except Exception as e:
             error_msg = f"点击网格失败: {e}"
             screenshot_step(sb, "click_grid_failed")
             return False, None, error_msg, server_name
 
-        # ========== 7. 等待 reCAPTCHA 验证完成（对勾出现） ==========
-        print("⏳ 等待 reCAPTCHA 验证完成...")
-        verified = False
-        for attempt in range(15):  # 最多等待 15 秒
+        # ========== 【关键】点击 "Verify" 按钮 ==========
+        print("🔘 点击 'Verify' 按钮...")
+        verify_clicked = False
+        try:
+            sb.click('button:contains("Verify")', timeout=3)
+            verify_clicked = True
+            print("✅ 已点击 'Verify' 按钮")
+        except Exception as e:
+            print(f"⚠️ 点击 'Verify' 按钮失败: {e}")
+
+        if not verify_clicked:
             try:
-                # 检查 g-recaptcha-response 是否有值
-                token = sb.execute_script("""
-                    var textarea = document.getElementById('g-recaptcha-response');
-                    return textarea ? textarea.value : '';
+                sb.execute_script("""
+                    var btns = document.querySelectorAll('button');
+                    for (var i = 0; i < btns.length; i++) {
+                        if (btns[i].innerText.toLowerCase().includes('verify')) {
+                            btns[i].click();
+                            break;
+                        }
+                    }
                 """)
-                if token and token.strip():
-                    print(f"✅ 验证 token 已填充 (长度: {len(token)})")
-                    verified = True
-                    break
-                # 也可以检查是否有验证成功样式
-                # 在主页面或 iframe 中查找 recaptcha 对勾
-                time.sleep(1)
-            except:
-                time.sleep(1)
-                continue
+                print("✅ 通过 JavaScript 点击 'Verify' 按钮")
+                verify_clicked = True
+            except Exception as e2:
+                print(f"⚠️ JavaScript 点击也失败: {e2}")
 
-        if not verified:
-            print("⚠️ 未检测到验证成功，尝试等待额外的 5 秒...")
-            time.sleep(5)
-
-        # 再次确认 token 是否已填充
-        token = sb.execute_script("""
-            var textarea = document.getElementById('g-recaptcha-response');
-            return textarea ? textarea.value : '';
-        """)
-        if token and token.strip():
-            print("✅ 验证 token 已确认，可以提交续期")
+        if not verify_clicked:
+            print("⚠️ 未找到 'Verify' 按钮，可能已自动验证")
         else:
-            print("⚠️ 验证 token 仍为空，可能验证未完成")
+            time.sleep(3)
+            screenshot_step(sb, "after_verify")
 
-        screenshot_step(sb, "after_verification")
+        # ========== 7. 等待验证完成（检查 token） ==========
+        print("⏳ 等待 reCAPTCHA 验证完成...")
+        token_filled = False
+        for attempt in range(15):
+            token = sb.execute_script("""
+                var textarea = document.getElementById('g-recaptcha-response');
+                return textarea ? textarea.value : '';
+            """)
+            if token and token.strip():
+                print(f"✅ 验证 token 已填充 (长度: {len(token)})")
+                token_filled = True
+                break
+            time.sleep(1)
+        if not token_filled:
+            print("⚠️ 验证 token 仍为空，可能验证未完成")
+            screenshot_step(sb, "token_not_filled")
+        else:
+            screenshot_step(sb, "token_filled")
 
         # ========== 8. 第二次点击 Renew（提交续期） ==========
         print("🔘 第二次点击 Renew（提交续期）...")
@@ -853,7 +867,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal (final with verification wait)")
+    print("🚀 Starting Host2Play renewal (final with Verify button)")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
