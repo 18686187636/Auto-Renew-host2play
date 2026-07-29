@@ -55,7 +55,6 @@ def commit_expiry_file():
     os.system('git push')
 
 def screenshot_step(sb, name):
-    """截图并保存为 step_{name}_{timestamp}.png"""
     ts = int(time.time() * 1000)
     filename = f"step_{name}_{ts}.png"
     sb.save_screenshot(filename)
