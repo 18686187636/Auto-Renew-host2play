@@ -90,22 +90,35 @@ def solve_recaptcha_via_acedata(image_data, question_code):
         "question": question_code,
         "image": img_base64
     }
+    print(f"📤 发送 API 请求，问题代码: {question_code}")
     resp = requests.post(CAPTCHA_API_URL, json=payload, headers=headers, timeout=60)
+    print(f"📥 响应状态码: {resp.status_code}")
+    # 打印响应内容前200字符以便调试
+    print(f"📄 响应内容预览: {resp.text[:200]}")
     if resp.status_code != 200:
-        error_info = resp.json().get("error", {})
-        raise Exception(f"API error: {error_info.get('code')} - {error_info.get('message')}")
-    result = resp.json()
+        try:
+            error_info = resp.json().get("error", {})
+            raise Exception(f"API error: {error_info.get('code')} - {error_info.get('message')}")
+        except:
+            raise Exception(f"API 请求失败，状态码 {resp.status_code}，响应: {resp.text[:200]}")
+    try:
+        result = resp.json()
+    except:
+        raise Exception(f"API 返回非 JSON 响应: {resp.text[:200]}")
     if not result.get("success"):
         error = result.get("error", {})
+        # 如果 error 字段为空，打印完整 result
+        if not error:
+            raise Exception(f"API 返回失败，无错误详情。完整响应: {json.dumps(result)}")
         raise Exception(f"API error: {error.get('code')} - {error.get('message')}")
     solution = result.get("solution", {})
     objects = solution.get("objects", [])
     if not objects:
-        raise Exception("No objects to click returned by API")
+        raise Exception("API 返回成功但无 objects 字段")
     return objects, solution.get("size", 300)
 
 def click_recaptcha_grid(sb, objects, grid_size=300):
-    # 先切换到图像挑战 iframe（与 capture 相同）
+    # 先切换到图像挑战 iframe
     try:
         iframes = sb.find_elements('iframe')
         for iframe in iframes:
@@ -264,15 +277,14 @@ def extract_question_from_page(sb):
             pass
         raise Exception("Could not find reCAPTCHA question text. Page source saved for debugging.")
 
-# ==================== 改进后的 capture_recaptcha_image（遍历 iframe 定位图像挑战） ====================
+# ==================== 改进后的 capture_recaptcha_image ====================
 def capture_recaptcha_image(sb):
-    # 遍历所有 iframe，找到包含图像挑战的 iframe（包含 .rc-imageselect-payload）
+    # 遍历所有 iframe，找到包含图像挑战的 iframe
     iframes = sb.find_elements('iframe')
     found = False
     for iframe in iframes:
         sb.switch_to_frame(iframe)
         try:
-            # 检查是否存在图像挑战元素
             sb.find_element('.rc-imageselect-payload', timeout=1)
             print("✅ 切换到图像挑战 iframe")
             found = True
@@ -281,7 +293,6 @@ def capture_recaptcha_image(sb):
             sb.switch_to_default_content()
             continue
     if not found:
-        # 如果找不到，尝试通过 src 查找
         try:
             sb.switch_to_frame('iframe[src*="recaptcha"][src*="image"]')
             found = True
@@ -291,7 +302,7 @@ def capture_recaptcha_image(sb):
     if not found:
         raise Exception("Could not find image challenge iframe")
 
-    # 在当前 iframe 中查找图片元素
+    # 查找图片元素
     img_elem = None
     try:
         img_elem = sb.find_element('img', timeout=2)
@@ -305,7 +316,6 @@ def capture_recaptcha_image(sb):
         except:
             pass
     if not img_elem:
-        # 用 JavaScript 搜索
         img_elem = sb.execute_script("""
             var imgs = document.querySelectorAll('img, canvas');
             for (var i = 0; i < imgs.length; i++) {
@@ -330,7 +340,6 @@ def capture_recaptcha_image(sb):
 
     print(f"📐 图片位置: left={left}, top={top}, width={width}, height={height}")
 
-    # 截取全屏并裁剪
     png_data = sb.driver.get_screenshot_as_png()
     img = Image.open(io.BytesIO(png_data))
 
