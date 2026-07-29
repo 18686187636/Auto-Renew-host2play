@@ -105,31 +105,47 @@ def solve_recaptcha_via_acedata(image_data, question_code):
     return objects, solution.get("size", 300)
 
 def click_recaptcha_grid(sb, objects, grid_size=300):
+    # 先切换到图像挑战 iframe（与 capture 相同）
     try:
-        iframes = sb.find_elements('iframe[src*="recaptcha"]')
+        iframes = sb.find_elements('iframe')
         for iframe in iframes:
             sb.switch_to_frame(iframe)
-            break
+            try:
+                sb.find_element('.rc-imageselect-payload', timeout=1)
+                print("✅ 切换到图像挑战 iframe")
+                break
+            except:
+                sb.switch_to_default_content()
+                continue
         else:
-            raise Exception("No reCAPTCHA iframe found")
+            raise Exception("Could not find image challenge iframe")
     except Exception as e:
-        raise Exception(f"Failed to switch to reCAPTCHA iframe: {e}")
+        raise Exception(f"Failed to switch to image challenge iframe: {e}")
 
-    # 查找图片元素（img 或 canvas）
+    # 查找图片元素
     img_elem = None
     try:
         img_elem = sb.find_element('img', timeout=2)
     except:
         pass
-
     if not img_elem:
         try:
             img_elem = sb.find_element('canvas', timeout=2)
         except:
             pass
-
     if not img_elem:
-        raise Exception("Could not find reCAPTCHA image element (img or canvas)")
+        img_elem = sb.execute_script("""
+            var imgs = document.querySelectorAll('img, canvas');
+            for (var i = 0; i < imgs.length; i++) {
+                var rect = imgs[i].getBoundingClientRect();
+                if (rect.width > 50 && rect.height > 50) {
+                    return imgs[i];
+                }
+            }
+            return null;
+        """)
+    if not img_elem:
+        raise Exception("Could not find image element in image challenge iframe")
 
     location = img_elem.location
     size = img_elem.size
@@ -248,37 +264,49 @@ def extract_question_from_page(sb):
             pass
         raise Exception("Could not find reCAPTCHA question text. Page source saved for debugging.")
 
-# ==================== 改进后的 capture_recaptcha_image（兼容 img 和 canvas） ====================
+# ==================== 改进后的 capture_recaptcha_image（遍历 iframe 定位图像挑战） ====================
 def capture_recaptcha_image(sb):
-    # 先尝试切换到 reCAPTCHA 的 iframe
-    try:
-        iframes = sb.find_elements('iframe[src*="recaptcha"]')
-        for iframe in iframes:
-            sb.switch_to_frame(iframe)
+    # 遍历所有 iframe，找到包含图像挑战的 iframe（包含 .rc-imageselect-payload）
+    iframes = sb.find_elements('iframe')
+    found = False
+    for iframe in iframes:
+        sb.switch_to_frame(iframe)
+        try:
+            # 检查是否存在图像挑战元素
+            sb.find_element('.rc-imageselect-payload', timeout=1)
+            print("✅ 切换到图像挑战 iframe")
+            found = True
             break
-        else:
-            raise Exception("No reCAPTCHA iframe found")
-    except Exception as e:
-        raise Exception(f"Failed to switch to reCAPTCHA iframe: {e}")
+        except:
+            sb.switch_to_default_content()
+            continue
+    if not found:
+        # 如果找不到，尝试通过 src 查找
+        try:
+            sb.switch_to_frame('iframe[src*="recaptcha"][src*="image"]')
+            found = True
+            print("✅ 通过 src 切换到图像挑战 iframe")
+        except:
+            pass
+    if not found:
+        raise Exception("Could not find image challenge iframe")
 
-    # 查找图片元素（img 或 canvas）
+    # 在当前 iframe 中查找图片元素
     img_elem = None
     try:
         img_elem = sb.find_element('img', timeout=2)
         print("✅ 找到 <img> 元素")
     except:
         pass
-
     if not img_elem:
         try:
             img_elem = sb.find_element('canvas', timeout=2)
             print("✅ 找到 <canvas> 元素")
         except:
             pass
-
     if not img_elem:
-        # 尝试用 JavaScript 查找任何图片相关的元素
-        js_img = sb.execute_script("""
+        # 用 JavaScript 搜索
+        img_elem = sb.execute_script("""
             var imgs = document.querySelectorAll('img, canvas');
             for (var i = 0; i < imgs.length; i++) {
                 var rect = imgs[i].getBoundingClientRect();
@@ -288,14 +316,11 @@ def capture_recaptcha_image(sb):
             }
             return null;
         """)
-        if js_img:
-            img_elem = js_img
+        if img_elem:
             print("✅ 通过 JavaScript 找到图片元素")
-
     if not img_elem:
-        raise Exception("Could not find reCAPTCHA image element (img or canvas)")
+        raise Exception("Could not find image element in image challenge iframe")
 
-    # 获取元素位置和大小
     location = img_elem.location
     size = img_elem.size
     left = location['x']
@@ -309,7 +334,6 @@ def capture_recaptcha_image(sb):
     png_data = sb.driver.get_screenshot_as_png()
     img = Image.open(io.BytesIO(png_data))
 
-    # 确保裁剪区域在图片范围内
     crop_left = max(0, int(left))
     crop_top = max(0, int(top))
     crop_right = min(img.width, int(left + width))
@@ -509,7 +533,6 @@ def perform_renewal_with_browser():
                     "fire hydrant": "/m/01pns0",
                     "fire hydrants": "/m/01pns0",
                     "boats": "/m/019jd",
-                    "boats": "/m/019jd",
                     "bridges": "/m/015kr",
                     "mountains": "/m/09d_r",
                     "stairs": "/m/01lynh",
@@ -518,7 +541,6 @@ def perform_renewal_with_browser():
                     "parking meters": "/m/015qbp",
                     "school buses": "/m/02yvhj",
                     "tractors": "/m/013xlm",
-                    "buses": "/m/01bjv"
                 }
 
                 question_code = None
