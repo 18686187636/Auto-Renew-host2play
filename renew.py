@@ -93,7 +93,6 @@ def solve_recaptcha_via_acedata(image_data, question_code):
     print(f"📤 发送 API 请求，问题代码: {question_code}")
     resp = requests.post(CAPTCHA_API_URL, json=payload, headers=headers, timeout=60)
     print(f"📥 响应状态码: {resp.status_code}")
-    # 打印响应内容前200字符以便调试
     print(f"📄 响应内容预览: {resp.text[:200]}")
     if resp.status_code != 200:
         try:
@@ -105,20 +104,20 @@ def solve_recaptcha_via_acedata(image_data, question_code):
         result = resp.json()
     except:
         raise Exception(f"API 返回非 JSON 响应: {resp.text[:200]}")
-    if not result.get("success"):
-        error = result.get("error", {})
-        # 如果 error 字段为空，打印完整 result
-        if not error:
-            raise Exception(f"API 返回失败，无错误详情。完整响应: {json.dumps(result)}")
-        raise Exception(f"API error: {error.get('code')} - {error.get('message')}")
-    solution = result.get("solution", {})
-    objects = solution.get("objects", [])
+    # 检查是否包含 solution 和 objects（API 没有 success 字段）
+    solution = result.get("solution")
+    if not solution:
+        error = result.get("error")
+        if error:
+            raise Exception(f"API error: {error.get('code')} - {error.get('message')}")
+        else:
+            raise Exception(f"API 返回未知格式，完整响应: {json.dumps(result)}")
+    objects = solution.get("objects")
     if not objects:
         raise Exception("API 返回成功但无 objects 字段")
     return objects, solution.get("size", 300)
 
 def click_recaptcha_grid(sb, objects, grid_size=300):
-    # 先切换到图像挑战 iframe
     try:
         iframes = sb.find_elements('iframe')
         for iframe in iframes:
@@ -135,7 +134,6 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
     except Exception as e:
         raise Exception(f"Failed to switch to image challenge iframe: {e}")
 
-    # 查找图片元素
     img_elem = None
     try:
         img_elem = sb.find_element('img', timeout=2)
@@ -184,9 +182,7 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
 
     sb.switch_to_default_content()
 
-# ==================== 改进后的 extract_question_from_page ====================
 def extract_question_from_page(sb):
-    # 方法1：传统方式 - 在主页和 iframe 中查找指定类
     try:
         elem = sb.find_element('.rc-imageselect-instructions', timeout=3)
         if elem:
@@ -213,7 +209,6 @@ def extract_question_from_page(sb):
     except:
         pass
 
-    # 方法2：使用 JavaScript 在所有 iframe 和主页面中搜索关键词
     js_code = """
     function findQuestion() {
         var keywords = ['选择', '点击', '图片', '图像', '包含', '所有', '请选择', '请点击', 'select', 'click', 'image'];
@@ -277,9 +272,7 @@ def extract_question_from_page(sb):
             pass
         raise Exception("Could not find reCAPTCHA question text. Page source saved for debugging.")
 
-# ==================== 改进后的 capture_recaptcha_image ====================
 def capture_recaptcha_image(sb):
-    # 遍历所有 iframe，找到包含图像挑战的 iframe
     iframes = sb.find_elements('iframe')
     found = False
     for iframe in iframes:
@@ -302,7 +295,6 @@ def capture_recaptcha_image(sb):
     if not found:
         raise Exception("Could not find image challenge iframe")
 
-    # 查找图片元素
     img_elem = None
     try:
         img_elem = sb.find_element('img', timeout=2)
@@ -381,7 +373,6 @@ def perform_renewal_with_browser():
         print("ℹ️ 未使用代理")
 
     with SB(**sb_kwargs) as sb:
-        # ---- CDP 设置 ----
         try:
             sb.driver.execute_cdp_cmd('Network.setUserAgentOverride', {
                 "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
@@ -406,14 +397,12 @@ def perform_renewal_with_browser():
         except Exception as e:
             print(f"⚠️ 注入失败: {e}")
 
-        # ---- 加载页面 ----
         print("🌐 打开续期页面...")
         sb.open(RENEW_URL)
         sb.wait_for_ready_state_complete()
         sb.sleep(8)
         screenshot_step(sb, "page_loaded")
 
-        # ---- 检测 Cloudflare ----
         title = sb.get_title()
         if "Just a moment" in title or "524" in title:
             error_msg = "Cloudflare 拦截"
@@ -450,7 +439,6 @@ def perform_renewal_with_browser():
             print(f"⚠️ Consent 处理失败: {e}")
             screenshot_step(sb, "consent_error")
 
-        # ---------- 点击 Renew 函数 ----------
         def click_renew():
             btn_selectors = [
                 'button.btn-primary:contains("Renew")',
@@ -476,7 +464,6 @@ def perform_renewal_with_browser():
                 pass
             return False
 
-        # ========== 2. 获取 sitekey ==========
         sitekey = sb.execute_script("""
             var elem = document.querySelector('.g-recaptcha');
             if (elem) return elem.getAttribute('data-sitekey');
@@ -485,7 +472,6 @@ def perform_renewal_with_browser():
         print(f"🔑 sitekey: {sitekey}")
         screenshot_step(sb, "sitekey")
 
-        # ========== 3. 第一次点击 Renew（触发验证） ==========
         print("🔘 第一次点击 Renew...")
         if not click_renew():
             error_msg = "点击 Renew 失败"
@@ -494,7 +480,6 @@ def perform_renewal_with_browser():
         time.sleep(3)
         screenshot_step(sb, "after_first_renew")
 
-        # ========== 4. 手动勾选复选框 ==========
         print("🔘 手动勾选 reCAPTCHA 复选框...")
         try:
             sb.wait_for_element('iframe[src*="recaptcha"]', timeout=10)
@@ -517,7 +502,6 @@ def perform_renewal_with_browser():
             except Exception as e2:
                 print(f"❌ CDP 点击也失败: {e2}")
 
-        # ========== 5. 等待并提取问题文本 ==========
         print("⏳ 等待图像验证并提取问题...")
         print(f"📄 当前页面标题: {sb.get_title()}")
         print(f"🔗 当前 URL: {sb.get_current_url()}")
@@ -530,7 +514,6 @@ def perform_renewal_with_browser():
                 question_text = extract_question_from_page(sb)
                 print(f"🧩 提取到的问题文本: {question_text}")
 
-                # 英文到代码的映射
                 question_map_en = {
                     "traffic lights": "/m/015qff",
                     "crosswalks": "/m/014xcs",
@@ -559,7 +542,6 @@ def perform_renewal_with_browser():
                         question_code = code
                         break
 
-                # 如果英文映射失败，尝试中文映射
                 if not question_code:
                     question_map_cn = {
                         "出租车": "/m/0pg52",
@@ -585,7 +567,6 @@ def perform_renewal_with_browser():
                             question_code = code
                             break
 
-                # 如果还是失败，尝试从文本中提取 /m/ 代码
                 if not question_code:
                     match = re.search(r'/m/[a-z0-9]+', question_text)
                     if match:
@@ -610,7 +591,6 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "question_failed")
             return False, None, error_msg, server_name
 
-        # ========== 6. 截取验证图像 ==========
         try:
             captcha_img = capture_recaptcha_image(sb)
             print("📸 图像已截取")
@@ -620,7 +600,6 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "capture_failed")
             return False, None, error_msg, server_name
 
-        # ========== 7. 调用 Ace Data Cloud 识别 ==========
         try:
             objects, grid_size = solve_recaptcha_via_acedata(captcha_img, question_code)
             print(f"🧩 需要点击的索引: {objects}")
@@ -630,7 +609,6 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "api_failed")
             return False, None, error_msg, server_name
 
-        # ========== 8. 点击网格 ==========
         try:
             click_recaptcha_grid(sb, objects, grid_size)
             print("✅ 网格点击完成")
@@ -641,7 +619,6 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "click_grid_failed")
             return False, None, error_msg, server_name
 
-        # ========== 9. 第二次点击 Renew（提交） ==========
         print("🔘 第二次点击 Renew（提交续期）...")
         if not click_renew():
             error_msg = "第二次点击失败"
@@ -652,14 +629,12 @@ def perform_renewal_with_browser():
         print("⏳ 等待续期处理...")
         time.sleep(10)
 
-        # ---- 刷新页面获取新到期时间 ----
         print("🔄 刷新页面...")
         sb.open(RENEW_URL)
         sb.wait_for_ready_state_complete()
         sb.sleep(5)
         screenshot_step(sb, "after_reload")
 
-        # ========== 10. 提取新的到期时间 ==========
         new_expiry_str = None
         expiry_selectors = ['#expireDate', '.expiry-date', 'span:contains("Expires")', 'div:contains("Expires")']
         for sel in expiry_selectors:
