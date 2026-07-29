@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 import os
 import sys
 import time
 import random
 import html
+import json
 import requests
 import tempfile
 import subprocess
@@ -18,7 +20,7 @@ try:
 except ImportError:
     pass
 
-# 配置区域
+# ==================== 配置区域 ====================
 RENEW_URLS = [
     "https://host2play.gratis/server/renew?i=51b0dc2e-b901-46bf-b47a-20f5e6051459",
     # 添加更多链接
@@ -27,27 +29,127 @@ RENEW_URLS = [
 MAX_CAPTCHA = 3
 MAX_RENEW_RETRIES_PER_URL = 20
 
-# 自定义异常
-class CaptchaBlocked(Exception):
-    pass
+# ==================== 环境变量读取 ====================
+CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")
+CRONJOB_API_KEY = os.getenv("CRONJOB_API_KEY")
+CRONJOB_JOB_ID = os.getenv("CRONJOB_JOB_ID")          # 已有任务 ID（可选）
+GH_TOKEN = os.getenv("GH_TOKEN")
+REPO_OWNER = os.getenv("REPO_OWNER")
+REPO_NAME = os.getenv("REPO_NAME")
+WORKFLOW_FILE = os.getenv("WORKFLOW_FILE", "renew.yml")
+BRANCH = os.getenv("BRANCH", "main")
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+TG_CHAT_ID = os.getenv("TG_CHAT_ID")
+AUDIO_API_URL = os.getenv("AUDIO_API_URL")            # 备用语音识别 API 地址
 
-# URL 脱敏处理
+# ==================== 辅助函数 ====================
 def mask_url(url):
-    """隐藏 URL 中 ?i= 后面的 UUID，只保留前1位"""
     import re
     return re.sub(r'(\?i=)([^&]{1})([^&]*)', r'\1\2***', url)
 
-# 统一日志
 def log(msg, level="INFO"):
     prefix = {"INFO": "[INFO]", "WARN": "[WARN]", "ERROR": "[ERROR]"}.get(level, "[INFO]")
     print(f"{prefix} {msg}", flush=True)
 
-# WARP IP 去重管理
+# ==================== Telegram 通知 ====================
+def send_tg_photo(token, chat_id, photo_path, caption, parse_mode='HTML'):
+    if not token or not chat_id:
+        return
+    if not photo_path or not os.path.exists(photo_path):
+        return
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    try:
+        with open(photo_path, "rb") as photo_file:
+            requests.post(
+                url,
+                data={"chat_id": chat_id, "caption": caption, "parse_mode": parse_mode},
+                files={"photo": photo_file},
+                timeout=30,
+            )
+        log("Telegram 图片通知发送成功")
+    except Exception as e:
+        log(f"Telegram 通知异常: {e}", "ERROR")
+
+def send_tg_message(token, chat_id, text):
+    if not token or not chat_id:
+        return
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    try:
+        requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=10)
+    except Exception as e:
+        log(f"Telegram 消息异常: {e}", "ERROR")
+
+# ==================== cron-job.org 定时任务管理 ====================
+def ensure_cronjob():
+    """
+    在 cron-job.org 上创建或更新定时任务，每 7小时30分 触发一次 GitHub Actions。
+    如果已有任务 ID（CRONJOB_JOB_ID），则更新；否则创建。
+    返回 (job_id, success)
+    """
+    if not CRONJOB_API_KEY or not GH_TOKEN or not REPO_OWNER or not REPO_NAME:
+        log("缺少 CRONJOB_API_KEY 或 GH_TOKEN 等环境变量，跳过定时任务设置", "WARN")
+        return None, False
+
+    # 构建 GitHub Actions 触发 URL
+    trigger_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/workflows/{WORKFLOW_FILE}/dispatches"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {GH_TOKEN}",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type": "application/json"
+    }
+    body = {"ref": BRANCH}
+
+    # cron-job.org 任务定义（每 7小时30分 = 450 分钟）
+    job_data = {
+        "name": f"Host2Play Renewal ({REPO_NAME})",
+        "url": trigger_url,
+        "request_method": "POST",
+        "request_headers": headers,
+        "request_body": json.dumps(body),
+        "type": "interval",
+        "interval_value": 450,          # 7小时30分 = 450 分钟
+        "interval_unit": "minutes",
+        "enabled": True
+    }
+
+    api_base = "https://api.cron-job.org/v1"
+    auth = {"Authorization": f"Bearer {CRONJOB_API_KEY}"}
+
+    if CRONJOB_JOB_ID:
+        # 更新已有任务
+        url = f"{api_base}/jobs/{CRONJOB_JOB_ID}"
+        method = "PUT"
+        log(f"更新 cron-job ID: {CRONJOB_JOB_ID}")
+    else:
+        # 创建新任务
+        url = f"{api_base}/jobs"
+        method = "POST"
+        log("创建新 cron-job 任务")
+
+    try:
+        resp = requests.request(method, url, json={"job": job_data}, headers=auth, timeout=20)
+        resp.raise_for_status()
+        result = resp.json()
+        job_id = result.get("id") or result.get("job_id")
+        if not CRONJOB_JOB_ID and job_id:
+            log(f"✅ cron-job 创建成功，ID: {job_id}")
+            log("💡 请将 CRONJOB_JOB_ID 添加到仓库 Secrets 中，以避免重复创建")
+            # 可以在此处自动将 job_id 写入环境变量（但 Actions 中无法持久化，仅提示）
+            # 可以发送 Telegram 通知提醒
+            send_tg_message(
+                TG_BOT_TOKEN, TG_CHAT_ID,
+                f"🆕 cron-job 已创建，ID: `{job_id}`\n请将此 ID 添加到 GitHub Secrets 的 CRONJOB_JOB_ID"
+            )
+        elif CRONJOB_JOB_ID:
+            log(f"✅ cron-job {CRONJOB_JOB_ID} 更新成功")
+        return job_id, True
+    except Exception as e:
+        log(f"cron-job 管理失败: {e}", "ERROR")
+        return None, False
+
+# ==================== WARP IP 去重管理 ====================
 class WarpManager:
-    """
-    系统级 WARP VPN IP 轮换。
-    _used_ips 记录本次运行已用过的 IP，重复时自动重试。
-    """
     def __init__(self):
         self._used_ips: set = set()
 
@@ -94,10 +196,6 @@ class WarpManager:
         return False
 
     def _do_one_rotate(self) -> str:
-        """
-        执行一次完整的注销 → 重注册 → 连接流程。
-        返回新 IP，失败返回空字符串。
-        """
         self._run(["disconnect"])
         time.sleep(2)
         self._run(["registration", "delete"])
@@ -115,30 +213,19 @@ class WarpManager:
         return self._get_current_ip()
 
     def rotate_ip(self, attempt_idx: int = 0, max_attempts: int = 5) -> bool:
-        """
-        轮换 WARP IP。
-        若新 IP 已被本次运行使用过则继续重试，最多尝试 max_attempts 次。
-        attempt_idx: 当前是第几次尝试（0-based），仅用于日志展示。
-        """
         log(f"[WARP] ========== 第 {attempt_idx + 1} 次 IP 轮换 ==========")
         log(f"[WARP] 已用 IP 池: {self._used_ips if self._used_ips else '(空)'}")
-
         old_ip = self._get_current_ip()
         log(f"[WARP] 旧 IP: {old_ip}")
-
         for i in range(1, max_attempts + 1):
             log(f"[WARP] 轮换尝试 {i}/{max_attempts}")
             new_ip = self._do_one_rotate()
-
             if not new_ip:
                 log(f"[WARP] ⚠️  第 {i} 次轮换失败，继续重试", "WARN")
                 continue
-
             if new_ip in self._used_ips:
                 log(f"[WARP] ♻️  IP {new_ip} 已被本次运行使用过，继续尝试...", "WARN")
                 continue
-
-            # 拿到未用过的新 IP
             self._used_ips.add(new_ip)
             if new_ip != old_ip:
                 log(f"[WARP] ✅ IP 已变化: {old_ip} → {new_ip}")
@@ -146,8 +233,6 @@ class WarpManager:
                 log(f"[WARP] ⚠️  IP 与旧 IP 相同（{new_ip}），但未被本轮其他请求使用，接受", "WARN")
             log(f"[WARP] 已用 IP 池: {self._used_ips}")
             return True
-
-        # 全部尝试都拿到重复 IP，接受并继续
         log(f"[WARP] ⚠️  {max_attempts} 次尝试均为重复 IP，使用当前 IP 继续执行", "WARN")
         new_ip = self._get_current_ip()
         if new_ip:
@@ -155,107 +240,19 @@ class WarpManager:
         return True
 
     def record_initial_ip(self):
-        """记录初始 IP，避免首次续期就分配到重复 IP。"""
         ip = self._get_current_ip()
         if ip:
             self._used_ips.add(ip)
             log(f"[WARP] 记录初始 IP: {ip}，已用 IP 池: {self._used_ips}")
 
-# 全局 WARP 管理器（单例）
-_warp_manager: WarpManager = None
-
-def get_warp_manager() -> WarpManager:
+_warp_manager = None
+def get_warp_manager():
     global _warp_manager
     if _warp_manager is None:
         _warp_manager = WarpManager()
     return _warp_manager
 
-# Telegram 通知
-def send_tg_photo(token, chat_id, photo_path, caption, parse_mode='HTML'):
-    if not token or not chat_id:
-        log("未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，跳过通知。", "WARN")
-        return
-    if not photo_path or not os.path.exists(photo_path):
-        log("未找到截图文件，跳过通知。", "WARN")
-        return
-    url = f"https://api.telegram.org/bot{token}/sendPhoto"
-    try:
-        with open(photo_path, "rb") as photo_file:
-            response = requests.post(
-                url,
-                data={"chat_id": chat_id, "caption": caption, "parse_mode": parse_mode},
-                files={"photo": photo_file},
-                timeout=30,
-            )
-        response.raise_for_status()
-        log("Telegram 图片通知发送成功")
-    except Exception as e:
-        log(f"Telegram 图片通知异常: {e}", "ERROR")
-
-# 页面元素提取
-def get_server_name(page):
-    try:
-        ele = page.ele('#serverName', timeout=2)
-        if ele:
-            return ele.text.strip()
-    except Exception:
-        pass
-    return "未知"
-
-def get_expire_time(page):
-    try:
-        ele = page.ele('#expireDate', timeout=2)
-        if ele:
-            return ele.text.strip()
-    except Exception:
-        pass
-    selectors = ['text:Expires in:', 'text:Deletes on:']
-    for selector in selectors:
-        try:
-            ele = page.ele(selector, timeout=1)
-            if ele:
-                text = (ele.text or "").strip()
-                if ":" in text:
-                    return text.split(":", 1)[1].strip()
-                if text:
-                    return text
-        except Exception:
-            pass
-    return "未知"
-
-# 构建通知
-def build_notification(success, url, server_name, old_expire, new_expire=None, failure_reason=""):
-    masked = mask_url(url)
-    if success:
-        lines = [
-            "✅ 续订成功",
-            "",
-            f"服务器：{server_name}",
-            f"到期: {old_expire} -> {new_expire}",
-            f"URL: {url}",
-        ]
-    else:
-        lines = [
-            "❌ 续订失败",
-            "",
-            f"服务器：{server_name}",
-            f"URL: {url}",
-        ]
-        if failure_reason:
-            lines.append(f"失败原因: {failure_reason}")
-    lines.append("")
-    lines.append("Host2Play Auto Renew")
-    return "\n".join(lines)
-
-def capture_page_screenshot(page, file_name):
-    try:
-        page.get_screenshot(path=file_name)
-        return file_name
-    except Exception as e:
-        log(f"截图失败: {e}", "WARN")
-        return None
-
-# reCAPTCHA 辅助函数
+# ==================== reCAPTCHA 辅助函数 ====================
 def find_recaptcha_frame(page, kind):
     try:
         for frame in page.get_frames():
@@ -426,6 +423,55 @@ def reload_challenge(page):
     except Exception:
         pass
 
+# ==================== 语音识别（含备用 API） ====================
+def recognize_audio_via_api(mp3_path):
+    """使用 CAPTCHA_API_KEY 调用备用语音识别 API"""
+    api_url = os.getenv("AUDIO_API_URL")
+    if not api_url or not CAPTCHA_API_KEY:
+        log("未配置 AUDIO_API_URL 或 CAPTCHA_API_KEY，跳过 API 语音识别", "WARN")
+        return None
+    try:
+        with open(mp3_path, "rb") as f:
+            files = {"audio": f}
+            headers = {"Authorization": f"Bearer {CAPTCHA_API_KEY}"}
+            resp = requests.post(api_url, files=files, headers=headers, timeout=30)
+            resp.raise_for_status()
+            result = resp.json()
+            # 假设返回格式包含 'text' 或 'result' 或 'data'
+            text = result.get("text") or result.get("result") or result.get("data")
+            if text and len(text) > 0:
+                log(f"备用 API 识别结果: {text}")
+                return text
+            else:
+                log(f"备用 API 未返回有效文本: {result}", "WARN")
+                return None
+    except Exception as e:
+        log(f"备用 API 语音识别异常: {e}", "ERROR")
+        return None
+
+def recognize_audio(mp3_path):
+    # 首选：Google 免费识别
+    try:
+        wav_path = mp3_path.replace(".mp3", ".wav")
+        AudioSegment.from_mp3(mp3_path).export(wav_path, format="wav")
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(wav_path) as src:
+            audio_data = recognizer.record(src)
+            text = recognizer.recognize_google(audio_data)
+        try:
+            os.remove(wav_path)
+        except Exception:
+            pass
+        if text:
+            log(f"Google 识别结果: {text}")
+            return text
+    except Exception as e:
+        log(f"Google 语音识别失败: {e}", "WARN")
+
+    # 备用：API 识别
+    log("尝试使用备用 API 进行语音识别...")
+    return recognize_audio_via_api(mp3_path)
+
 def fill_and_verify(page, text):
     bframe = find_recaptcha_frame(page, "bframe")
     if not bframe:
@@ -475,21 +521,8 @@ def download_audio(url):
             pass
     return None
 
-def recognize_audio(mp3_path):
-    try:
-        wav_path = mp3_path.replace(".mp3", ".wav")
-        AudioSegment.from_mp3(mp3_path).export(wav_path, format="wav")
-        recognizer = sr.Recognizer()
-        with sr.AudioFile(wav_path) as src:
-            audio_data = recognizer.record(src)
-            text = recognizer.recognize_google(audio_data)
-        try:
-            os.remove(wav_path)
-        except Exception:
-            pass
-        return text
-    except Exception:
-        return None
+class CaptchaBlocked(Exception):
+    pass
 
 def solve_recaptcha(page):
     start = time.time()
@@ -560,11 +593,70 @@ def solve_recaptcha(page):
 
     raise RuntimeError("验证码达到最大尝试次数")
 
-# 单个 URL 续期流程（IP 去重重试）
+# ==================== 页面元素获取 ====================
+def get_server_name(page):
+    try:
+        ele = page.ele('#serverName', timeout=2)
+        if ele:
+            return ele.text.strip()
+    except Exception:
+        pass
+    return "未知"
+
+def get_expire_time(page):
+    try:
+        ele = page.ele('#expireDate', timeout=2)
+        if ele:
+            return ele.text.strip()
+    except Exception:
+        pass
+    selectors = ['text:Expires in:', 'text:Deletes on:']
+    for selector in selectors:
+        try:
+            ele = page.ele(selector, timeout=1)
+            if ele:
+                text = (ele.text or "").strip()
+                if ":" in text:
+                    return text.split(":", 1)[1].strip()
+                if text:
+                    return text
+        except Exception:
+            pass
+    return "未知"
+
+def build_notification(success, url, server_name, old_expire, new_expire=None, failure_reason=""):
+    masked = mask_url(url)
+    if success:
+        lines = [
+            "✅ 续订成功",
+            "",
+            f"服务器：{server_name}",
+            f"到期: {old_expire} -> {new_expire}",
+            f"URL: {url}",
+        ]
+    else:
+        lines = [
+            "❌ 续订失败",
+            "",
+            f"服务器：{server_name}",
+            f"URL: {url}",
+        ]
+        if failure_reason:
+            lines.append(f"失败原因: {failure_reason}")
+    lines.append("")
+    lines.append("Host2Play Auto Renew")
+    return "\n".join(lines)
+
+def capture_page_screenshot(page, file_name):
+    try:
+        page.get_screenshot(path=file_name)
+        return file_name
+    except Exception as e:
+        log(f"截图失败: {e}", "WARN")
+        return None
+
+# ==================== 单个 URL 续期流程 ====================
 def renew_single_url(url, attempt_idx: int = 0):
-    """
-    attempt_idx: 当前是第几个 URL（0-based），传给 WarpManager 用于日志展示。
-    """
     success = False
     server_name = "未知"
     old_expire = "未知"
@@ -596,7 +688,6 @@ def renew_single_url(url, attempt_idx: int = 0):
                 co.set_argument('--window-size=1280,720')
                 co.set_argument('--log-level=3')
                 co.set_argument('--silent')
-                # 每次独立用户数据目录，避免残留 cookie/指纹
                 user_data_dir = tempfile.mkdtemp()
                 co.set_user_data_path(user_data_dir)
                 co.auto_port()
@@ -697,7 +788,6 @@ def renew_single_url(url, attempt_idx: int = 0):
                         pass
                     page = None
                     if attempt < MAX_RENEW_RETRIES_PER_URL:
-                        # ✅ 去重轮换：传入当前尝试序号
                         get_warp_manager().rotate_ip(attempt_idx=attempt - 1)
                         continue
                     break
@@ -744,7 +834,6 @@ def renew_single_url(url, attempt_idx: int = 0):
                         except Exception:
                             pass
                         page = None
-                    # ✅ 去重轮换
                     get_warp_manager().rotate_ip(attempt_idx=attempt - 1)
                     continue
                 break
@@ -767,16 +856,12 @@ def renew_single_url(url, attempt_idx: int = 0):
 
     return success, server_name, old_expire, new_expire, screenshot_path, failure_reason
 
-# 主入口
+# ==================== 主入口 ====================
 def main():
-    tg_token = os.getenv("TG_BOT_TOKEN")
-    tg_chat_id = os.getenv("TG_CHAT_ID")
-
     if not RENEW_URLS:
         log("请在 RENEW_URLS 列表中添加续期链接", "ERROR")
         sys.exit(1)
 
-    # ✅ 记录初始 IP，防止首个 URL 分配到已用 IP
     get_warp_manager().record_initial_ip()
 
     total_success = 0
@@ -791,12 +876,14 @@ def main():
         if success:
             caption = build_notification(True, url, server_name, old_expire, new_expire)
             total_success += 1
+            # 续期成功后，确保 cron-job.org 定时任务存在（创建或更新）
+            ensure_cronjob()
         else:
             caption = build_notification(
                 False, url, server_name, old_expire, failure_reason=failure_reason
             )
 
-        send_tg_photo(tg_token, tg_chat_id, screenshot, caption, parse_mode='HTML')
+        send_tg_photo(TG_BOT_TOKEN, TG_CHAT_ID, screenshot, caption, parse_mode='HTML')
 
     log(f"全部完成，成功 {total_success}/{len(RENEW_URLS)} 个链接")
     if total_success < len(RENEW_URLS):
