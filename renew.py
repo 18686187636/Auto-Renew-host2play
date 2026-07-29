@@ -256,7 +256,7 @@ def perform_renewal_with_browser():
     with SB(**sb_kwargs) as sb:
         # ---- 使用 CDP 注入反检测脚本（在导航之前） ----
         try:
-            # 可选：通过 CDP 设置自定义 User-Agent（若需要）
+            # 通过 CDP 设置自定义 User-Agent
             sb.driver.execute_cdp_cmd('Network.setUserAgentOverride', {
                 "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
             })
@@ -310,6 +310,30 @@ def perform_renewal_with_browser():
         else:
             error_msg = "页面加载失败"
             return False, None, error_msg, server_name
+
+        # ========== 新增：处理 Consent 按钮 ==========
+        try:
+            consent_selectors = [
+                'button:contains("Consent")',
+                'button:contains("Accept")',
+                'button:contains("同意")',
+                '[role="button"]:contains("Consent")',
+                'a:contains("Consent")',
+                '#consent-button',
+                '.consent-btn'
+            ]
+            for selector in consent_selectors:
+                try:
+                    sb.click(selector, timeout=2)
+                    print("✅ 已点击 Consent 按钮")
+                    sb.sleep(1)   # 等待弹窗消失
+                    break
+                except:
+                    continue
+            else:
+                print("ℹ️ 未发现 Consent 按钮，跳过")
+        except Exception as e:
+            print(f"⚠️ 处理 Consent 时出错（忽略）: {e}")
 
         # 获取服务器名称
         try:
