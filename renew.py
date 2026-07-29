@@ -116,6 +116,7 @@ def solve_recaptcha_via_acedata(image_data, question_code):
         raise Exception("API 返回成功但无 objects 字段")
     return objects, solution.get("size", 300)
 
+# ==================== 修复后的 click_recaptcha_grid（使用 JavaScript 点击） ====================
 def click_recaptcha_grid(sb, objects, grid_size=300):
     try:
         iframes = sb.find_elements('iframe')
@@ -169,6 +170,7 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
     cell_w = width / cols
     cell_h = height / rows
 
+    # 获取页面滚动偏移
     scroll_x = sb.execute_script("return window.scrollX;")
     scroll_y = sb.execute_script("return window.scrollY;")
 
@@ -177,10 +179,17 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
         col = idx % cols
         x = left + col * cell_w + cell_w / 2
         y = top + row * cell_h + cell_h / 2
+        # 转换为视口坐标
         viewport_x = x - scroll_x
         viewport_y = y - scroll_y
-        print(f"🔘 Clicking index {idx} at ({viewport_x:.0f}, {viewport_y:.0f})")
-        sb.click_at(viewport_x, viewport_y)
+        print(f"🔘 Clicking index {idx} at viewport ({viewport_x:.0f}, {viewport_y:.0f})")
+        # 使用 JavaScript 在视口坐标处点击元素
+        sb.execute_script(f"""
+            var el = document.elementFromPoint({viewport_x}, {viewport_y});
+            if (el) {{
+                el.click();
+            }}
+        """)
         time.sleep(0.5)
 
     sb.switch_to_default_content()
@@ -544,9 +553,8 @@ def perform_renewal_with_browser():
                 question_text = extract_question_from_page(sb)
                 print(f"🧩 提取到的问题文本: {question_text}")
 
-                # ========== 完整映射（含单复数、中英罗） ==========
                 question_map = {
-                    # English
+                    # English (单复数)
                     "traffic lights": "/m/015qff",
                     "traffic light": "/m/015qff",
                     "crosswalks": "/m/014xcs",
@@ -791,7 +799,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal (final with complete mappings)")
+    print("🚀 Starting Host2Play renewal (final with JS click)")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
