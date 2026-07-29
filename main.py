@@ -79,45 +79,64 @@ def send_tg_message(token, chat_id, text):
     except Exception as e:
         log(f"Telegram 消息异常: {e}", "ERROR")
 
-# ==================== cron-job.org 定时任务管理（使用 PUT 创建新任务） ====================
-def ensure_cronjob():
+# ==================== 获取 GitHub 工作流 ID ====================
+def get_github_workflow_id(owner, repo, workflow_file, token):
+    """通过 GitHub API 获取工作流文件的数字 ID"""
+    url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        for wf in data.get("workflows", []):
+            if wf.get("path") == f".github/workflows/{workflow_file}":
+                return wf.get("id")
+        log(f"❌ 未找到工作流文件: {workflow_file}", "ERROR")
+        return None
+    except Exception as e:
+        log(f"❌ 获取工作流 ID 失败: {e}", "ERROR")
+        return None
+
+# ==================== cron-job.org 定时任务管理（使用数字工作流 ID） ====================
+def schedule_cronjob(trigger_timestamp):
     """
-    每次调用都使用 PUT /jobs 创建新的定时任务。
-    触发时间为当前 UTC 时间 + 450 分钟，任务执行一次后自动过期（expiresAt + 5 分钟）。
-    参考 Therose cloud 脚本的成功实现。
+    使用 cron-job.org API 创建定时任务，触发时间为 trigger_timestamp（Unix 时间戳）。
+    参考 Therose cloud 脚本的成功实现，不设置重试。
     """
     if not CRONJOB_API_KEY or not GH_TOKEN or not REPO_OWNER or not REPO_NAME:
         log("缺少 CRONJOB_API_KEY 或 GH_TOKEN 等环境变量，跳过定时任务设置", "WARN")
-        return None, False
+        return False
 
-    # 构建 GitHub Actions 触发 URL
-    trigger_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/workflows/{WORKFLOW_FILE}/dispatches"
+    # 获取工作流数字 ID
+    workflow_id = get_github_workflow_id(REPO_OWNER, REPO_NAME, WORKFLOW_FILE, GH_TOKEN)
+    if not workflow_id:
+        log("⚠️ 无法获取工作流 ID，跳过调度", "WARN")
+        return False
 
-    # 计算下次触发时间：当前 UTC 时间 + 450 分钟
-    now = datetime.now(timezone.utc)
-    next_time = now + timedelta(minutes=450)
-    minute = next_time.minute
-    hour = next_time.hour
-    day = next_time.day
-    month = next_time.month
-    expires_at = (next_time + timedelta(minutes=5)).strftime("%Y%m%d%H%M%S")
+    dt = datetime.fromtimestamp(trigger_timestamp, tz=timezone.utc)
+    schedule = {
+        "minutes": [dt.minute],
+        "hours": [dt.hour],
+        "mdays": [dt.day],
+        "months": [dt.month],
+        "wdays": [-1],
+        "timezone": "UTC",
+        "expiresAt": (dt + timedelta(minutes=5)).strftime("%Y%m%d%H%M%S")
+    }
 
-    # 任务定义（与 Therose cloud 脚本格式一致）
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/workflows/{workflow_id}/dispatches"
+
     payload = {
         "job": {
             "enabled": True,
-            "url": trigger_url,
+            "url": url,
             "requestMethod": 1,
             "saveResponses": True,
-            "schedule": {
-                "minutes": [minute],
-                "hours": [hour],
-                "mdays": [day],
-                "months": [month],
-                "wdays": [-1],
-                "timezone": "UTC",
-                "expiresAt": expires_at
-            },
+            "schedule": schedule,
             "extendedData": {
                 "headers": {
                     "Accept": "application/vnd.github+json",
@@ -136,47 +155,27 @@ def ensure_cronjob():
         "Content-Type": "application/json"
     }
 
-    log(f"📤 发送 PUT 请求到 cron-job.org，触发时间: {next_time.strftime('%Y-%m-%d %H:%M UTC')}")
+    log(f"📤 发送请求到 cron-job.org，触发时间: {dt.strftime('%Y-%m-%d %H:%M UTC')}")
     log(f"请求体: {json.dumps(payload, indent=2)}")
 
-    # 重试机制（最多5次，指数退避）
-    max_retries = 5
-    wait_times = [10, 20, 40, 80, 120]
-
-    for attempt in range(max_retries):
-        try:
-            resp = requests.put("https://api.cron-job.org/jobs", headers=headers, json=payload, timeout=30)
-            log(f"响应状态码: {resp.status_code}")
-            log(f"响应内容: {resp.text[:500]}")
-            resp.raise_for_status()
-            result = resp.json()
-            job_id = result.get("jobId")
-            if job_id:
-                log(f"✅ cron-job 创建成功，ID: {job_id}")
-                send_tg_message(
-                    TG_BOT_TOKEN, TG_CHAT_ID,
-                    f"📅 cron-job 已创建，ID: `{job_id}`\n触发时间: {next_time.strftime('%Y-%m-%d %H:%M UTC')}"
-                )
-                return job_id, True
-            else:
-                log("⚠️ 响应中未包含 jobId", "WARN")
-                return None, False
-        except requests.exceptions.RequestException as e:
-            if resp.status_code in (429, 500, 502, 503, 504):
-                wait = wait_times[attempt] if attempt < len(wait_times) else 60
-                log(f"⚠️ 临时错误 ({resp.status_code})，{wait}s 后重试 ({attempt+1}/{max_retries})...", "WARN")
-                time.sleep(wait)
-                continue
-            else:
-                log(f"cron-job 创建失败: {e}", "ERROR")
-                break
-    else:
-        log(f"❌ 在 {max_retries} 次重试后仍然失败，请手动检查 cron-job.org 账户", "ERROR")
-        send_tg_message(
-            TG_BOT_TOKEN, TG_CHAT_ID,
-            "⚠️ cron-job 创建失败（重试 5 次后），请手动检查 cron-job.org API 密钥及配额。"
-        )
-        return None, False
+    try:
+        resp = requests.put("https://api.cron-job.org/jobs", headers=headers, json=payload, timeout=30)
+        log(f"响应状态码: {resp.status_code}")
+        log(f"响应内容: {resp.text[:500]}")
+        if resp.status_code == 200:
+            job_id = resp.json().get("jobId")
+            log(f"✅ cron-job 创建成功，ID: {job_id}")
+            send_tg_message(
+                TG_BOT_TOKEN, TG_CHAT_ID,
+                f"📅 cron-job 已创建，ID: `{job_id}`\n触发时间: {dt.strftime('%Y-%m-%d %H:%M UTC')}"
+            )
+            return True
+        else:
+            log(f"❌ 创建 cron 任务失败: HTTP {resp.status_code}", "ERROR")
+            return False
+    except Exception as e:
+        log(f"❌ 调用 cron-job.org API 异常: {e}", "ERROR")
+        return False
 
 # ==================== WARP IP 去重管理 ====================
 class WarpManager:
@@ -880,7 +879,11 @@ def renew_single_url(url, attempt_idx: int = 0):
 
 # ==================== 主入口 ====================
 def main():
-    ensure_cronjob()
+    # 调度下次执行（当前时间 + 450 分钟）
+    now = datetime.now(timezone.utc)
+    next_run = now + timedelta(minutes=450)
+    trigger_timestamp = next_run.timestamp()
+    schedule_cronjob(trigger_timestamp)
 
     if not RENEW_URLS:
         log("请在 RENEW_URLS 列表中添加续期链接", "ERROR")
