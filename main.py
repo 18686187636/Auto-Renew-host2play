@@ -79,11 +79,34 @@ def send_tg_message(token, chat_id, text):
     except Exception as e:
         log(f"Telegram 消息异常: {e}", "ERROR")
 
-# ==================== cron-job.org 定时任务管理（基于绝对时间，参考 Therose cloud） ====================
-def ensure_cronjob():
+# ==================== 自动更新 GitHub Secret ====================
+def update_github_secret(secret_name, secret_value):
+    """使用 gh CLI 更新 GitHub Actions Secret"""
+    try:
+        cmd = [
+            "gh", "secret", "set", secret_name,
+            "--body", str(secret_value),
+            "--repo", f"{REPO_OWNER}/{REPO_NAME}"
+        ]
+        env = os.environ.copy()
+        env["GH_TOKEN"] = GH_TOKEN  # 确保 gh 使用自定义 token
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
+        if result.returncode == 0:
+            log(f"✅ Secret {secret_name} 已自动更新为 {secret_value}")
+            return True
+        else:
+            log(f"❌ 更新 Secret 失败: {result.stderr}", "ERROR")
+            return False
+    except Exception as e:
+        log(f"❌ 更新 Secret 异常: {e}", "ERROR")
+        return False
+
+# ==================== cron-job.org 定时任务管理（带重试 + 自动更新 Secret） ====================
+def ensure_cronjob(retry_count=3):
     """
     在 cron-job.org 上创建或更新定时任务，设置为在当前 UTC 时间 + 450 分钟的时刻执行一次。
-    如果已有任务 ID（CRONJOB_JOB_ID），则更新；否则创建。
+    若遇到 429/500 等临时错误，自动重试（指数退避）。
+    创建新任务成功后，自动更新 CRONJOB_JOB_ID Secret。
     """
     if not CRONJOB_API_KEY or not GH_TOKEN or not REPO_OWNER or not REPO_NAME:
         log("缺少 CRONJOB_API_KEY 或 GH_TOKEN 等环境变量，跳过定时任务设置", "WARN")
@@ -101,12 +124,12 @@ def ensure_cronjob():
     # 构建 GitHub Actions 触发 URL
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/workflows/{WORKFLOW_FILE}/dispatches"
 
-    # 任务定义（与 Therose cloud 脚本完全一致）
+    # 任务定义
     payload = {
         "job": {
             "enabled": True,
             "url": url,
-            "requestMethod": 1,                     # 1 = POST
+            "requestMethod": 1,
             "saveResponses": True,
             "schedule": {
                 "minutes": [minute],
@@ -136,12 +159,10 @@ def ensure_cronjob():
     }
 
     if CRONJOB_JOB_ID:
-        # 更新现有任务
         api_url = f"https://api.cron-job.org/jobs/{CRONJOB_JOB_ID}"
         method = "PATCH"
         log(f"更新 cron-job ID: {CRONJOB_JOB_ID}")
     else:
-        # 创建新任务
         api_url = "https://api.cron-job.org/jobs"
         method = "PUT"
         log("创建新 cron-job 任务")
@@ -149,29 +170,53 @@ def ensure_cronjob():
     log(f"请求 URL: {method} {api_url}")
     log(f"请求体: {json.dumps(payload, indent=2)}")
 
-    try:
-        resp = requests.request(method, api_url, headers=auth_headers, json=payload, timeout=30)
-        log(f"响应状态码: {resp.status_code}")
-        log(f"响应内容: {resp.text[:500]}")
-        resp.raise_for_status()
-        result = resp.json()
-        job_id = result.get("jobId")
-        if not CRONJOB_JOB_ID and job_id:
-            log(f"✅ cron-job 创建成功，ID: {job_id}")
-            log("💡 请将 CRONJOB_JOB_ID 添加到仓库 Secrets 中，以避免重复创建")
-            send_tg_message(
-                TG_BOT_TOKEN, TG_CHAT_ID,
-                f"🆕 cron-job 已创建，ID: `{job_id}`\n请将此 ID 添加到 GitHub Secrets 的 CRONJOB_JOB_ID"
-            )
-        elif CRONJOB_JOB_ID:
-            log(f"✅ cron-job {CRONJOB_JOB_ID} 更新成功")
-        return job_id, True
-    except Exception as e:
-        log(f"cron-job 管理失败: {e}", "ERROR")
-        if "404" in str(e) and CRONJOB_JOB_ID:
-            log("⚠️ 任务 ID 无效，尝试重新创建...", "WARN")
-            os.environ["CRONJOB_JOB_ID"] = ""
-            return ensure_cronjob()
+    # ---- 重试逻辑 ----
+    attempt = 0
+    while attempt < retry_count:
+        try:
+            resp = requests.request(method, api_url, headers=auth_headers, json=payload, timeout=30)
+            log(f"响应状态码: {resp.status_code}")
+            log(f"响应内容: {resp.text[:500]}")
+            resp.raise_for_status()
+            result = resp.json()
+            job_id = result.get("jobId")
+            if not CRONJOB_JOB_ID and job_id:
+                log(f"✅ cron-job 创建成功，ID: {job_id}")
+                # ---- 自动更新 Secret ----
+                if GH_TOKEN:
+                    log("🔄 尝试自动更新 GitHub Secret CRONJOB_JOB_ID...")
+                    if update_github_secret("CRONJOB_JOB_ID", job_id):
+                        log("✅ Secret 已自动更新，无需手动操作")
+                    else:
+                        log("⚠️ 自动更新失败，请手动将 ID 添加到 Secrets", "WARN")
+                        send_tg_message(
+                            TG_BOT_TOKEN, TG_CHAT_ID,
+                            f"🆕 cron-job 已创建，ID: `{job_id}`\n请手动将此 ID 添加到 GitHub Secrets 的 CRONJOB_JOB_ID"
+                        )
+                else:
+                    log("⚠️ GH_TOKEN 未设置，无法自动更新 Secret", "WARN")
+                    send_tg_message(
+                        TG_BOT_TOKEN, TG_CHAT_ID,
+                        f"🆕 cron-job 已创建，ID: `{job_id}`\n请手动将此 ID 添加到 GitHub Secrets 的 CRONJOB_JOB_ID"
+                    )
+            elif CRONJOB_JOB_ID:
+                log(f"✅ cron-job {CRONJOB_JOB_ID} 更新成功")
+            return job_id, True
+        except requests.exceptions.RequestException as e:
+            if resp.status_code in (429, 500, 502, 503, 504):
+                wait = (2 ** attempt) * 5  # 5, 10, 20 秒
+                log(f"⚠️ 临时错误 ({resp.status_code})，{wait}s 后重试...", "WARN")
+                time.sleep(wait)
+                attempt += 1
+            else:
+                log(f"cron-job 管理失败: {e}", "ERROR")
+                if "404" in str(e) and CRONJOB_JOB_ID:
+                    log("⚠️ 任务 ID 无效，尝试重新创建...", "WARN")
+                    os.environ["CRONJOB_JOB_ID"] = ""
+                    return ensure_cronjob(retry_count=1)  # 递归重试一次
+                break
+    else:
+        log(f"❌ 在 {retry_count} 次重试后仍然失败，请稍后手动检查 cron-job", "ERROR")
         return None, False
 
 # ==================== WARP IP 去重管理 ====================
