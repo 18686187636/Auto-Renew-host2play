@@ -116,6 +116,7 @@ def solve_recaptcha_via_acedata(image_data, question_code):
         raise Exception("API 返回成功但无 objects 字段")
     return objects, solution.get("size", 300)
 
+# ==================== 优化后的 click_recaptcha_grid（使用 uc_click_at） ====================
 def click_recaptcha_grid(sb, objects, grid_size=300):
     try:
         iframes = sb.find_elements('iframe')
@@ -169,6 +170,7 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
     cell_w = width / cols
     cell_h = height / rows
 
+    # 获取视口滚动偏移
     scroll_x = sb.execute_script("return window.scrollX;")
     scroll_y = sb.execute_script("return window.scrollY;")
 
@@ -179,13 +181,9 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
         y = top + row * cell_h + cell_h / 2
         viewport_x = x - scroll_x
         viewport_y = y - scroll_y
-        print(f"🔘 Clicking index {idx} at viewport ({viewport_x:.0f}, {viewport_y:.0f})")
-        sb.execute_script(f"""
-            var el = document.elementFromPoint({viewport_x}, {viewport_y});
-            if (el) {{
-                el.click();
-            }}
-        """)
+        print(f"🔘 点击索引 {idx} 于视口坐标 ({viewport_x:.0f}, {viewport_y:.0f})")
+        # 使用 uc_click_at 确保点击稳定
+        sb.uc_click_at(viewport_x, viewport_y)
         time.sleep(0.5)
 
     sb.switch_to_default_content()
@@ -495,8 +493,8 @@ def perform_renewal_with_browser():
         time.sleep(3)
         screenshot_step(sb, "after_first_renew")
 
-        # ========== 2. 勾选复选框（遍历所有 iframe） ==========
-        print("🔘 手动勾选 reCAPTCHA 复选框（遍历 iframe）...")
+        # ========== 2. 勾选复选框 ==========
+        print("🔘 手动勾选 reCAPTCHA 复选框...")
         checkbox_clicked = False
         try:
             iframes = sb.find_elements('iframe')
@@ -536,7 +534,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "checkbox_checked")
             time.sleep(3)
 
-        # ========== 3. 等待并提取问题文本 ==========
+        # ========== 3. 提取问题文本 ==========
         print("⏳ 等待图像验证并提取问题...")
         print(f"📄 当前页面标题: {sb.get_title()}")
         print(f"🔗 当前 URL: {sb.get_current_url()}")
@@ -654,7 +652,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "question_failed")
             return False, None, error_msg, server_name
 
-        # ========== 4. 截取验证图像 ==========
+        # ========== 4. 截取图像 ==========
         try:
             captcha_img = capture_recaptcha_image(sb)
             print("📸 图像已截取")
@@ -674,7 +672,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "api_failed")
             return False, None, error_msg, server_name
 
-        # ========== 6. 点击网格 ==========
+        # ========== 6. 点击网格（使用 uc_click_at） ==========
         try:
             click_recaptcha_grid(sb, objects, grid_size)
             print("✅ 网格点击完成")
@@ -685,16 +683,18 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "click_grid_failed")
             return False, None, error_msg, server_name
 
-        # ========== 【关键】点击 "Verify" 按钮 ==========
-        print("🔘 点击 'Verify' 按钮...")
+        # ========== 7. 点击 "Verify" 按钮 ==========
+        print("🔘 尝试点击 'Verify' 按钮...")
         verify_clicked = False
+        # 方法1: 使用 SeleniumBase 的点击
         try:
             sb.click('button:contains("Verify")', timeout=3)
             verify_clicked = True
-            print("✅ 已点击 'Verify' 按钮")
-        except Exception as e:
-            print(f"⚠️ 点击 'Verify' 按钮失败: {e}")
+            print("✅ 点击了 'Verify' 按钮")
+        except:
+            pass
 
+        # 方法2: 使用 JavaScript
         if not verify_clicked:
             try:
                 sb.execute_script("""
@@ -702,22 +702,23 @@ def perform_renewal_with_browser():
                     for (var i = 0; i < btns.length; i++) {
                         if (btns[i].innerText.toLowerCase().includes('verify')) {
                             btns[i].click();
-                            break;
+                            return true;
                         }
                     }
+                    return false;
                 """)
                 print("✅ 通过 JavaScript 点击 'Verify' 按钮")
                 verify_clicked = True
-            except Exception as e2:
-                print(f"⚠️ JavaScript 点击也失败: {e2}")
+            except:
+                pass
 
         if not verify_clicked:
-            print("⚠️ 未找到 'Verify' 按钮，可能已自动验证")
+            print("ℹ️ 未找到 'Verify' 按钮，可能无需点击")
         else:
             time.sleep(3)
             screenshot_step(sb, "after_verify")
 
-        # ========== 7. 等待验证完成（检查 token） ==========
+        # ========== 8. 等待验证完成（检查 token） ==========
         print("⏳ 等待 reCAPTCHA 验证完成...")
         token_filled = False
         for attempt in range(15):
@@ -736,7 +737,7 @@ def perform_renewal_with_browser():
         else:
             screenshot_step(sb, "token_filled")
 
-        # ========== 8. 第二次点击 Renew（提交续期） ==========
+        # ========== 9. 提交续期 ==========
         print("🔘 第二次点击 Renew（提交续期）...")
         if not click_renew():
             error_msg = "第二次点击失败"
@@ -754,7 +755,7 @@ def perform_renewal_with_browser():
         sb.sleep(5)
         screenshot_step(sb, "after_reload")
 
-        # ========== 9. 提取新的到期时间 ==========
+        # ========== 10. 提取新的到期时间 ==========
         new_expiry_str = None
         expiry_selectors = ['#expireDate', '.expiry-date', 'span:contains("Expires")', 'div:contains("Expires")']
         for sel in expiry_selectors:
@@ -867,7 +868,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal (final with Verify button)")
+    print("🚀 Starting Host2Play renewal (uc_click_at + Verify button)")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
