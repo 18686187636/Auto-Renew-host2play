@@ -89,7 +89,7 @@ def update_github_secret(secret_name, secret_value):
             "--repo", f"{REPO_OWNER}/{REPO_NAME}"
         ]
         env = os.environ.copy()
-        env["GH_TOKEN"] = GH_TOKEN  # 确保 gh 使用自定义 token
+        env["GH_TOKEN"] = GH_TOKEN
         result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
         if result.returncode == 0:
             log(f"✅ Secret {secret_name} 已自动更新为 {secret_value}")
@@ -101,11 +101,11 @@ def update_github_secret(secret_name, secret_value):
         log(f"❌ 更新 Secret 异常: {e}", "ERROR")
         return False
 
-# ==================== cron-job.org 定时任务管理（带重试 + 自动更新 Secret） ====================
-def ensure_cronjob(retry_count=3):
+# ==================== cron-job.org 定时任务管理（增强重试） ====================
+def ensure_cronjob():
     """
     在 cron-job.org 上创建或更新定时任务，设置为在当前 UTC 时间 + 450 分钟的时刻执行一次。
-    若遇到 429/500 等临时错误，自动重试（指数退避）。
+    若遇到 429/500 等临时错误，自动重试（指数退避，最多5次）。
     创建新任务成功后，自动更新 CRONJOB_JOB_ID Secret。
     """
     if not CRONJOB_API_KEY or not GH_TOKEN or not REPO_OWNER or not REPO_NAME:
@@ -170,9 +170,11 @@ def ensure_cronjob(retry_count=3):
     log(f"请求 URL: {method} {api_url}")
     log(f"请求体: {json.dumps(payload, indent=2)}")
 
-    # ---- 重试逻辑 ----
-    attempt = 0
-    while attempt < retry_count:
+    # ---- 增强重试逻辑（最多5次，指数退避） ----
+    max_retries = 5
+    wait_times = [5, 10, 20, 40, 80]  # 秒
+
+    for attempt in range(max_retries):
         try:
             resp = requests.request(method, api_url, headers=auth_headers, json=payload, timeout=30)
             log(f"响应状态码: {resp.status_code}")
@@ -204,19 +206,24 @@ def ensure_cronjob(retry_count=3):
             return job_id, True
         except requests.exceptions.RequestException as e:
             if resp.status_code in (429, 500, 502, 503, 504):
-                wait = (2 ** attempt) * 5  # 5, 10, 20 秒
-                log(f"⚠️ 临时错误 ({resp.status_code})，{wait}s 后重试...", "WARN")
+                wait = wait_times[attempt] if attempt < len(wait_times) else 60
+                log(f"⚠️ 临时错误 ({resp.status_code})，{wait}s 后重试 ({attempt+1}/{max_retries})...", "WARN")
                 time.sleep(wait)
-                attempt += 1
+                continue
             else:
                 log(f"cron-job 管理失败: {e}", "ERROR")
                 if "404" in str(e) and CRONJOB_JOB_ID:
                     log("⚠️ 任务 ID 无效，尝试重新创建...", "WARN")
                     os.environ["CRONJOB_JOB_ID"] = ""
-                    return ensure_cronjob(retry_count=1)  # 递归重试一次
+                    return ensure_cronjob()  # 递归重试一次
                 break
     else:
-        log(f"❌ 在 {retry_count} 次重试后仍然失败，请稍后手动检查 cron-job", "ERROR")
+        log(f"❌ 在 {max_retries} 次重试后仍然失败，请稍后手动检查 cron-job", "ERROR")
+        send_tg_message(
+            TG_BOT_TOKEN, TG_CHAT_ID,
+            f"⚠️ cron-job 更新失败（429 限流），请手动检查 cron-job.org 任务状态。\n"
+            f"当前任务 ID: {CRONJOB_JOB_ID or '(无)'}"
+        )
         return None, False
 
 # ==================== WARP IP 去重管理 ====================
