@@ -113,26 +113,28 @@ def ensure_cronjob():
         "enabled": True
     }
 
-    # 修复：API 基础 URL 应为 https://api.cron-job.org（不含 /v1）
+    # 根据 cron-job.org API 文档：
+    # - 创建任务：PUT /jobs
+    # - 更新任务：PATCH /jobs/{jobId}
     api_base = "https://api.cron-job.org"
     auth = {"Authorization": f"Bearer {CRONJOB_API_KEY}"}
 
     if CRONJOB_JOB_ID:
-        # 更新已有任务
+        # 更新已有任务（使用 PATCH）
         url = f"{api_base}/jobs/{CRONJOB_JOB_ID}"
-        method = "PUT"
+        method = "PATCH"
         log(f"更新 cron-job ID: {CRONJOB_JOB_ID}")
     else:
-        # 创建新任务
+        # 创建新任务（使用 PUT）
         url = f"{api_base}/jobs"
-        method = "POST"
+        method = "PUT"
         log("创建新 cron-job 任务")
 
     try:
         resp = requests.request(method, url, json={"job": job_data}, headers=auth, timeout=20)
         resp.raise_for_status()
         result = resp.json()
-        job_id = result.get("id") or result.get("job_id")
+        job_id = result.get("jobId") or result.get("id")
         if not CRONJOB_JOB_ID and job_id:
             log(f"✅ cron-job 创建成功，ID: {job_id}")
             log("💡 请将 CRONJOB_JOB_ID 添加到仓库 Secrets 中，以避免重复创建")
@@ -145,6 +147,12 @@ def ensure_cronjob():
         return job_id, True
     except Exception as e:
         log(f"cron-job 管理失败: {e}", "ERROR")
+        # 如果返回 404 且 CRONJOB_JOB_ID 存在但无效，尝试重新创建
+        if "404" in str(e) and CRONJOB_JOB_ID:
+            log("⚠️ 任务 ID 无效，尝试重新创建...", "WARN")
+            # 清除无效 ID，递归重试
+            os.environ["CRONJOB_JOB_ID"] = ""
+            return ensure_cronjob()
         return None, False
 
 # ==================== WARP IP 去重管理 ====================
