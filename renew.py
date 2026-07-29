@@ -13,7 +13,6 @@ from datetime import datetime
 import pytz
 from PIL import Image
 from seleniumbase import SB
-from selenium.webdriver.common.action_chains import ActionChains
 
 # ==================== 环境变量 ====================
 RENEW_URL = "https://host2play.gratis/server/renew?i=51b0dc2e-b901-46bf-b47a-20f5e6051459"
@@ -117,7 +116,7 @@ def solve_recaptcha_via_acedata(image_data, question_code):
         raise Exception("API 返回成功但无 objects 字段")
     return objects, solution.get("size", 300)
 
-# ==================== 改进后的 click_recaptcha_grid（使用 ActionChains） ====================
+# ==================== 修复后的 click_recaptcha_grid（使用 click_at） ====================
 def click_recaptcha_grid(sb, objects, grid_size=300):
     try:
         iframes = sb.find_elements('iframe')
@@ -135,6 +134,7 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
     except Exception as e:
         raise Exception(f"Failed to switch to image challenge iframe: {e}")
 
+    # 获取图片元素
     img_elem = None
     try:
         img_elem = sb.find_element('img', timeout=2)
@@ -176,8 +176,6 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
     scroll_x = sb.execute_script("return window.scrollX;")
     scroll_y = sb.execute_script("return window.scrollY;")
 
-    actions = ActionChains(sb.driver)
-
     for idx in objects:
         row = idx // cols
         col = idx % cols
@@ -189,10 +187,8 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
         viewport_y = y - scroll_y
         print(f"🔘 点击索引 {idx} 于视口坐标 ({viewport_x:.0f}, {viewport_y:.0f})")
 
-        # 使用 ActionChains 移动到该坐标并点击
-        actions.move_by_offset(viewport_x, viewport_y).click().perform()
-        # 重置鼠标位置，避免累积偏移
-        actions.move_by_offset(-viewport_x, -viewport_y).perform()
+        # 使用 sb.click_at() 点击视口坐标（SeleniumBase 标准方法）
+        sb.click_at(viewport_x, viewport_y)
         time.sleep(0.5)
 
     sb.switch_to_default_content()
@@ -681,7 +677,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "api_failed")
             return False, None, error_msg, server_name
 
-        # ========== 6. 点击网格（使用 ActionChains） ==========
+        # ========== 6. 点击网格（使用 click_at） ==========
         try:
             click_recaptcha_grid(sb, objects, grid_size)
             print("✅ 网格点击完成")
@@ -725,10 +721,10 @@ def perform_renewal_with_browser():
             time.sleep(3)
             screenshot_step(sb, "after_verify")
 
-        # ========== 8. 等待验证完成（检查 token） ==========
+        # ========== 8. 等待验证完成 ==========
         print("⏳ 等待 reCAPTCHA 验证完成...")
         token_filled = False
-        for attempt in range(15):
+        for attempt in range(20):
             token = sb.execute_script("""
                 var textarea = document.getElementById('g-recaptcha-response');
                 return textarea ? textarea.value : '';
@@ -755,7 +751,7 @@ def perform_renewal_with_browser():
         print("⏳ 等待续期处理（15秒）...")
         time.sleep(15)
 
-        # ---- 刷新页面获取新到期时间 ----
+        # ---- 刷新页面 ----
         print("🔄 刷新页面...")
         sb.open(RENEW_URL)
         sb.wait_for_ready_state_complete()
@@ -875,7 +871,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal (ActionChains + Verify button)")
+    print("🚀 Starting Host2Play renewal (click_at + extended wait)")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
