@@ -6,9 +6,12 @@ import sys
 import json
 import time
 import re
+import base64
+import io
 import requests
 from datetime import datetime
 import pytz
+from PIL import Image
 from seleniumbase import SB
 
 # ==================== 环境变量 ====================
@@ -24,7 +27,7 @@ REPO_OWNER = os.getenv("REPO_OWNER")
 REPO_NAME = os.getenv("REPO_NAME")
 WORKFLOW_FILE = os.getenv("WORKFLOW_FILE", "renew.yml")
 BRANCH = os.getenv("BRANCH", "main")
-PROXY = os.getenv("PROXY")  # socks5://127.0.0.1:1080
+PROXY = os.getenv("PROXY")
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")  # Ace Data Cloud Token
 
 # ==================== 辅助函数 ====================
@@ -68,33 +71,163 @@ def get_current_ip(proxy=None):
     except Exception as e:
         return f"获取失败: {e}"
 
-# ==================== Ace Data Cloud Token API ====================
-TOKEN_API_URL = "https://api.acedata.cloud/captcha/token/recaptcha2"
+# ==================== Ace Data Cloud Recognition API ====================
+CAPTCHA_API_URL = "https://api.acedata.cloud/captcha/recognition/recaptcha2"
 
-def get_recaptcha_token(sitekey, page_url, proxy=None):
+def solve_recaptcha_via_acedata(image_data, question_code):
     if not CAPTCHA_API_KEY:
         raise Exception("CAPTCHA_API_KEY not set")
+    buffered = io.BytesIO()
+    image_data.save(buffered, format="PNG")
+    img_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
     headers = {
         "accept": "application/json",
         "authorization": f"Bearer {CAPTCHA_API_KEY}",
         "content-type": "application/json"
     }
     payload = {
-        "website_key": sitekey,
-        "website_url": page_url,
-        "async": False
+        "question": question_code,
+        "image": img_base64
     }
-    if proxy:
-        payload["proxy"] = proxy
-    resp = requests.post(TOKEN_API_URL, json=payload, headers=headers, timeout=120)
+    resp = requests.post(CAPTCHA_API_URL, json=payload, headers=headers, timeout=60)
     if resp.status_code != 200:
         error_info = resp.json().get("error", {})
-        raise Exception(f"Token API 错误: {error_info.get('code')} - {error_info.get('message')}")
+        raise Exception(f"API error: {error_info.get('code')} - {error_info.get('message')}")
     result = resp.json()
-    token = result.get("token")
-    if not token:
-        raise Exception("Token API 响应中无 token")
-    return token
+    if not result.get("success"):
+        error = result.get("error", {})
+        raise Exception(f"API error: {error.get('code')} - {error.get('message')}")
+    solution = result.get("solution", {})
+    objects = solution.get("objects", [])
+    if not objects:
+        raise Exception("No objects to click returned by API")
+    return objects, solution.get("size", 300)
+
+def click_recaptcha_grid(sb, objects, grid_size=300):
+    try:
+        iframes = sb.find_elements('iframe[src*="recaptcha"]')
+        for iframe in iframes:
+            sb.switch_to_frame(iframe)
+            break
+        else:
+            raise Exception("No reCAPTCHA iframe found")
+    except Exception as e:
+        raise Exception(f"Failed to switch to reCAPTCHA iframe: {e}")
+    img_elem = None
+    try:
+        img_elem = sb.find_element('img', timeout=3)
+    except:
+        try:
+            img_elem = sb.find_element('canvas', timeout=3)
+        except:
+            pass
+    if not img_elem:
+        raise Exception("Could not find reCAPTCHA image element")
+    location = img_elem.location
+    size = img_elem.size
+    left = location['x']
+    top = location['y']
+    width = size['width']
+    height = size['height']
+    cols = 3
+    rows = 3
+    cell_w = width / cols
+    cell_h = height / rows
+    actions = sb.driver.action_chains
+    for idx in objects:
+        row = idx // cols
+        col = idx % cols
+        x = left + col * cell_w + cell_w / 2
+        y = top + row * cell_h + cell_h / 2
+        print(f"🔘 Clicking index {idx} at ({x:.0f}, {y:.0f})")
+        actions.move_by_offset(x, y).click().perform()
+        time.sleep(0.5)
+    sb.switch_to_default_content()
+
+def extract_question_from_page(sb):
+    question_text = None
+    try:
+        elem = sb.find_element('.rc-imageselect-instructions', timeout=3)
+        if elem:
+            question_text = elem.text.strip()
+    except:
+        pass
+    if not question_text:
+        try:
+            iframes = sb.find_elements('iframe[src*="recaptcha"]')
+            for iframe in iframes:
+                sb.switch_to_frame(iframe)
+                try:
+                    elem = sb.find_element('.rc-imageselect-instructions', timeout=2)
+                    if elem:
+                        question_text = elem.text.strip()
+                        break
+                except:
+                    continue
+            sb.switch_to_default_content()
+        except:
+            pass
+    if not question_text:
+        raise Exception("Could not find reCAPTCHA question text")
+    question_map = {
+        "出租车": "/m/0pg52",
+        "巴士": "/m/01bjv",
+        "校车": "/m/02yvhj",
+        "摩托车": "/m/04_sv",
+        "拖拉机": "/m/013xlm",
+        "烟囱": "/m/01jk_4",
+        "人行横道": "/m/014xcs",
+        "红绿灯": "/m/015qff",
+        "自行车": "/m/0199g",
+        "停车计价表": "/m/015qbp",
+        "汽车": "/m/0k4j",
+        "桥": "/m/015kr",
+        "船": "/m/019jd",
+        "棕榈树": "/m/0cdl1",
+        "山": "/m/09d_r",
+        "消防栓": "/m/01pns0",
+        "楼梯": "/m/01lynh"
+    }
+    for cn, code in question_map.items():
+        if cn in question_text:
+            return code
+    match = re.search(r'/m/[a-z0-9]+', question_text)
+    if match:
+        return match.group(0)
+    raise Exception(f"Unrecognized question: {question_text}")
+
+def capture_recaptcha_image(sb):
+    try:
+        iframes = sb.find_elements('iframe[src*="recaptcha"]')
+        for iframe in iframes:
+            sb.switch_to_frame(iframe)
+            break
+        else:
+            raise Exception("No reCAPTCHA iframe found")
+    except Exception as e:
+        raise Exception(f"Failed to switch to reCAPTCHA iframe: {e}")
+    img_elem = None
+    try:
+        img_elem = sb.find_element('img', timeout=3)
+    except:
+        try:
+            img_elem = sb.find_element('canvas', timeout=3)
+        except:
+            pass
+    if not img_elem:
+        raise Exception("Could not find reCAPTCHA image element")
+    location = img_elem.location
+    size = img_elem.size
+    left = location['x']
+    top = location['y']
+    width = size['width']
+    height = size['height']
+    png_data = sb.driver.get_screenshot_as_png()
+    img = Image.open(io.BytesIO(png_data))
+    cropped = img.crop((left, top, left + width, top + height))
+    resized = cropped.resize((300, 300), Image.LANCZOS)
+    sb.switch_to_default_content()
+    return resized
 
 # ==================== 核心续期流程 ====================
 def perform_renewal_with_browser():
@@ -182,7 +315,7 @@ def perform_renewal_with_browser():
         except Exception as e:
             print(f"⚠️ Consent 处理失败: {e}")
 
-        # ---------- 点击 Renew 函数（仅用于触发验证） ----------
+        # ---------- 点击 Renew 函数 ----------
         def click_renew():
             btn_selectors = [
                 'button.btn-primary:contains("Renew")',
@@ -206,38 +339,23 @@ def perform_renewal_with_browser():
                 pass
             return False
 
-        # ========== 2. 获取 sitekey ==========
+        # ========== 2. 获取 sitekey（仅用于显示） ==========
         sitekey = sb.execute_script("""
             var elem = document.querySelector('.g-recaptcha');
             if (elem) return elem.getAttribute('data-sitekey');
-            var scripts = document.getElementsByTagName('script');
-            for (var i=0; i<scripts.length; i++) {
-                var src = scripts[i].src || '';
-                if (src.indexOf('recaptcha/api.js') !== -1) {
-                    var match = src.match(/render=([^&]+)/);
-                    if (match) return match[1];
-                }
-                var html = scripts[i].innerHTML || '';
-                var m = html.match(/sitekey['"]?\\s*[:=]\\s*['"]([^'"]+)['"]/);
-                if (m) return m[1];
-            }
             return null;
         """)
-        if not sitekey:
-            error_msg = "无法获取 sitekey"
-            screenshot_step(sb, "sitekey_failed")
-            return False, None, error_msg, server_name
         print(f"🔑 sitekey: {sitekey}")
 
-        # ========== 3. 第一次点击 Renew（触发验证弹窗） ==========
-        print("🔘 第一次点击 Renew（触发验证）...")
+        # ========== 3. 第一次点击 Renew（触发验证） ==========
+        print("🔘 第一次点击 Renew...")
         if not click_renew():
             error_msg = "点击 Renew 失败"
             screenshot_step(sb, "renew_click_failed")
             return False, None, error_msg, server_name
         time.sleep(3)
 
-        # ========== 4. 手动勾选复选框（模拟用户操作） ==========
+        # ========== 4. 手动勾选复选框 ==========
         print("🔘 手动勾选 reCAPTCHA 复选框...")
         try:
             sb.wait_for_element('iframe[src*="recaptcha"]', timeout=10)
@@ -246,68 +364,58 @@ def perform_renewal_with_browser():
             sb.click('#recaptcha-anchor')
             print("✅ 已勾选")
             sb.switch_to_default_content()
-            time.sleep(2)
+            time.sleep(3)
         except Exception as e:
-            print(f"⚠️ 手动勾选失败: {e}")
+            print(f"⚠️ 勾选失败: {e}")
             sb.switch_to_default_content()
-            # 如果失败，仍继续尝试
 
-        # ========== 5. 获取 token ==========
-        print("🔄 获取 reCAPTCHA token...")
+        # ========== 5. 等待图像验证出现 ==========
+        print("⏳ 等待图像验证加载...")
+        time.sleep(8)
+        screenshot_step(sb, "after_checkbox")
+
+        # ========== 6. 提取问题文本 ==========
         try:
-            token = get_recaptcha_token(sitekey, RENEW_URL, PROXY)
-            print(f"✅ token: {token[:20]}...")
+            question_code = extract_question_from_page(sb)
+            print(f"🧩 Question code: {question_code}")
         except Exception as e:
-            error_msg = f"获取 token 失败: {e}"
-            screenshot_step(sb, "token_failed")
+            error_msg = f"提取问题失败: {e}"
+            screenshot_step(sb, "question_failed")
             return False, None, error_msg, server_name
 
-        # ========== 6. 注入 token ==========
-        print("💉 注入 token...")
-        inject_script = f"""
-            (function() {{
-                var textarea = document.getElementById('g-recaptcha-response');
-                if (textarea) {{
-                    textarea.value = '{token}';
-                    textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    textarea.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                }}
-                // 尝试调用可能的回调（如果有）
-                if (typeof onSuccess === 'function') onSuccess('{token}');
-                if (typeof verifyCallback === 'function') verifyCallback('{token}');
-                if (typeof callback === 'function') callback('{token}');
-                // 触发容器事件
-                var elem = document.querySelector('.g-recaptcha');
-                if (elem) elem.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                return true;
-            }})();
-        """
-        sb.execute_script(inject_script)
-        print("✅ token 注入完成")
-        time.sleep(2)
-
-        # 验证填充
-        filled = sb.execute_script("""
-            var ta = document.getElementById('g-recaptcha-response');
-            return ta ? ta.value.length > 0 : false;
-        """)
-        if not filled:
-            print("⚠️ token 未填充，强制写入")
-            sb.execute_script(f"""
-                document.getElementById('g-recaptcha-response').value = '{token}';
-            """)
-            time.sleep(1)
-
-        screenshot_step(sb, "after_inject")
-
-        # ========== 7. 直接调用 renew() 函数提交（而不是点击按钮） ==========
-        print("🔘 直接调用 renew() 提交续期...")
+        # ========== 7. 截取验证图像 ==========
         try:
-            sb.execute_script("renew();")
-            print("✅ renew() 执行成功")
+            captcha_img = capture_recaptcha_image(sb)
+            print("📸 图像已截取")
         except Exception as e:
-            error_msg = f"执行 renew() 失败: {e}"
-            screenshot_step(sb, "renew_call_failed")
+            error_msg = f"截取图像失败: {e}"
+            screenshot_step(sb, "capture_failed")
+            return False, None, error_msg, server_name
+
+        # ========== 8. 调用 Ace Data Cloud 识别 ==========
+        try:
+            objects, grid_size = solve_recaptcha_via_acedata(captcha_img, question_code)
+            print(f"🧩 需要点击的索引: {objects}")
+        except Exception as e:
+            error_msg = f"识别失败: {e}"
+            screenshot_step(sb, "api_failed")
+            return False, None, error_msg, server_name
+
+        # ========== 9. 点击网格 ==========
+        try:
+            click_recaptcha_grid(sb, objects, grid_size)
+            print("✅ 网格点击完成")
+            time.sleep(3)
+        except Exception as e:
+            error_msg = f"点击网格失败: {e}"
+            screenshot_step(sb, "click_grid_failed")
+            return False, None, error_msg, server_name
+
+        # ========== 10. 第二次点击 Renew（提交） ==========
+        print("🔘 第二次点击 Renew（提交续期）...")
+        if not click_renew():
+            error_msg = "第二次点击失败"
+            screenshot_step(sb, "second_renew_failed")
             return False, None, error_msg, server_name
 
         screenshot_step(sb, "after_submit")
@@ -321,7 +429,7 @@ def perform_renewal_with_browser():
         sb.sleep(5)
         screenshot_step(sb, "after_reload")
 
-        # ========== 8. 提取新的到期时间 ==========
+        # ========== 11. 提取新的到期时间 ==========
         new_expiry_str = None
         expiry_selectors = ['#expireDate', '.expiry-date', 'span:contains("Expires")', 'div:contains("Expires")']
         for sel in expiry_selectors:
@@ -412,7 +520,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal (direct renew() call)")
+    print("🚀 Starting Host2Play renewal (Image Recognition)")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
