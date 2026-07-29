@@ -241,9 +241,11 @@ def perform_renewal_with_browser():
     ip = get_current_ip(PROXY if PROXY else None)
     print(f"📍 出口 IP: {ip}")
 
+    # ========== 关键修改：使用 xvfb 虚拟显示 ==========
     sb_kwargs = {
         "uc": True,
-        "headless": True,
+        "headless": False,      # 必须设为 False 才能启用 xvfb
+        "xvfb": True,           # 启用虚拟显示，解决无头模式下点击复选框失败的问题
         "page_load_strategy": "eager"
     }
     if PROXY:
@@ -366,13 +368,13 @@ def perform_renewal_with_browser():
         time.sleep(3)
         screenshot_step(sb, "after_first_renew")
 
-        # ========== 4. 手动勾选复选框 ==========
+        # ========== 4. 手动勾选复选框（现在 xvfb 已启用，可以正常点击） ==========
         print("🔘 手动勾选 reCAPTCHA 复选框...")
         try:
             sb.wait_for_element('iframe[src*="recaptcha"]', timeout=10)
             sb.switch_to_frame('iframe[src*="recaptcha"]')
             sb.wait_for_element('#recaptcha-anchor', timeout=5)
-            sb.click('#recaptcha-anchor')
+            sb.click('#recaptcha-anchor')   # 现在使用普通 click，因为 xvfb 提供了显示环境
             print("✅ 已勾选")
             sb.switch_to_default_content()
             time.sleep(3)
@@ -381,6 +383,14 @@ def perform_renewal_with_browser():
             print(f"⚠️ 勾选失败: {e}")
             sb.switch_to_default_content()
             screenshot_step(sb, "checkbox_error")
+            # 如果勾选失败，尝试通过 CDP 点击（备用方案）
+            try:
+                print("🔄 尝试使用 CDP 点击复选框...")
+                sb.cdp.gui_click_element('#recaptcha-anchor')
+                print("✅ CDP 点击成功")
+                screenshot_step(sb, "checkbox_cdp")
+            except:
+                print("❌ CDP 点击也失败")
 
         # ========== 5. 等待并提取问题文本（循环尝试） ==========
         print("⏳ 等待图像验证并提取问题...")
@@ -547,7 +557,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal (Image Recognition with Full Screenshots)")
+    print("🚀 Starting Host2Play renewal (xvfb mode with full screenshots)")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
