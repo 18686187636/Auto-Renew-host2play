@@ -1,7 +1,7 @@
 name: Host2Play 续期
 
 on:
-  workflow_dispatch:  # 仅保留手动触发，由 cron-job.org 调用
+  workflow_dispatch:
 
 permissions:
   actions: write
@@ -21,10 +21,12 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 安装系统依赖
+      - name: 安装系统依赖（使用清华源加速）
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb ffmpeg unzip curl
+          sudo sed -i 's/archive.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list
+          sudo apt-get update
+          sudo apt-get install -y xvfb ffmpeg unzip curl --no-install-recommends
           wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo dpkg -i /tmp/chrome.deb || sudo apt-get install -f -y
 
@@ -52,7 +54,6 @@ jobs:
 
       - name: 执行续订
         env:
-          # 必填
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           CAPTCHA_API_KEY: ${{ secrets.CAPTCHA_API_KEY }}
@@ -60,8 +61,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           REPO_OWNER: ${{ secrets.REPO_OWNER }}
           REPO_NAME: ${{ secrets.REPO_NAME }}
-          # 可选（脚本有默认值）
-          CRONJOB_JOB_ID: ${{ secrets.CRONJOB_JOB_ID }}
           WORKFLOW_FILE: ${{ secrets.WORKFLOW_FILE }}
           BRANCH: ${{ secrets.BRANCH }}
           AUDIO_API_URL: ${{ secrets.AUDIO_API_URL }}
