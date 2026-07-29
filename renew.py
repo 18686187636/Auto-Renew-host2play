@@ -60,7 +60,6 @@ def screenshot_step(sb, name):
     print(f"📸 Screenshot: step_{name}_{ts}.png")
 
 def get_current_ip(proxy=None):
-    """通过代理获取当前出口 IP"""
     proxies = None
     if proxy:
         proxies = {"http": proxy, "https": proxy}
@@ -241,9 +240,9 @@ def perform_renewal_with_browser():
     ip = get_current_ip(proxy_for_ip)
     print(f"📍 当前出口 IP: {ip}")
 
-    # 构建 SeleniumBase 参数（移除了 user_agent，兼容新版）
     sb_kwargs = {
-        "uc": True,                  # 使用 undetected-chromedriver
+        "uc": True,
+        "uc_cdp": True,              # 启用 CDP 绕过
         "headless": True,
         "page_load_strategy": "eager"
     }
@@ -254,64 +253,51 @@ def perform_renewal_with_browser():
         print("ℹ️ 未使用代理")
 
     with SB(**sb_kwargs) as sb:
-        # ---- 使用 CDP 注入反检测脚本（在导航之前） ----
+        # ---- CDP 设置 ----
         try:
-            # 通过 CDP 设置自定义 User-Agent
             sb.driver.execute_cdp_cmd('Network.setUserAgentOverride', {
                 "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
             })
             print("✅ 自定义 User-Agent 已设置")
         except Exception as e:
-            print(f"⚠️ 设置 User-Agent 失败（非关键）: {e}")
+            print(f"⚠️ 设置 User-Agent 失败: {e}")
 
         try:
             sb.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
                 "source": """
-                    // 隐藏 webdriver 特征
                     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                    // 伪造 plugins
                     Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-                    // 伪造 languages
                     Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh']});
-                    // 伪造 chrome 对象
                     window.chrome = { runtime: {} };
-                    // 伪造 permissions
                     window.navigator.permissions = { query: () => Promise.resolve({ state: 'prompt' }) };
                 """
             })
             print("✅ 反检测脚本已注入")
         except Exception as e:
-            print(f"⚠️ CDP 注入失败（继续尝试）: {e}")
+            print(f"⚠️ CDP 注入失败: {e}")
 
+        # ---- 加载页面（使用带重连的方法） ----
         print("🌐 Opening renewal page...")
-        max_retries = 3
-        for attempt in range(max_retries):
+        try:
+            sb.uc_open_with_reconnect(RENEW_URL, reconnect_time=5)
+        except Exception as e:
+            print(f"⚠️ uc_open_with_reconnect 失败，使用普通 open: {e}")
             sb.open(RENEW_URL)
-            sb.wait_for_ready_state_complete()
-            wait_time = 20 if attempt == 0 else 15
-            print(f"⏳ 等待 {wait_time} 秒（尝试 {attempt+1}/{max_retries}）...")
-            sb.sleep(wait_time)
-            screenshot_step(sb, f"page_loaded_{attempt+1}")
 
-            title = sb.get_title()
-            page_source = sb.get_page_source()
-            if "524" in title or "cloudflare" in page_source.lower():
-                print(f"⚠️ Cloudflare 拦截 (尝试 {attempt+1}/{max_retries})")
-                if attempt < max_retries - 1:
-                    sb.refresh()
-                    continue
-                else:
-                    error_msg = "Cloudflare 拦截或超时，请更换代理节点（当前出口IP可能被封锁）"
-                    screenshot_step(sb, "blocked")
-                    return False, None, error_msg, server_name
-            else:
-                print("✅ 页面正常加载")
-                break
-        else:
-            error_msg = "页面加载失败"
+        sb.wait_for_ready_state_complete()
+        sb.sleep(8)
+        screenshot_step(sb, "page_loaded")
+
+        # ---- 精确检测 Cloudflare 拦截（仅当标题为 "Just a moment..."） ----
+        title = sb.get_title()
+        if "Just a moment" in title or "524" in title:
+            error_msg = "Cloudflare 拦截（重连失败），请更换代理"
+            screenshot_step(sb, "blocked")
             return False, None, error_msg, server_name
+        else:
+            print("✅ 页面正常加载")
 
-        # ========== 新增：处理 Consent 按钮 ==========
+        # ========== 优先处理 Consent 按钮 ==========
         try:
             consent_selectors = [
                 'button:contains("Consent")',
@@ -326,7 +312,7 @@ def perform_renewal_with_browser():
                 try:
                     sb.click(selector, timeout=2)
                     print("✅ 已点击 Consent 按钮")
-                    sb.sleep(1)   # 等待弹窗消失
+                    sb.sleep(1)
                     break
                 except:
                     continue
@@ -335,7 +321,7 @@ def perform_renewal_with_browser():
         except Exception as e:
             print(f"⚠️ 处理 Consent 时出错（忽略）: {e}")
 
-        # 获取服务器名称
+        # ---- 获取服务器名称 ----
         try:
             name_elem = sb.find_element('#serverName', timeout=2)
             if name_elem:
@@ -343,6 +329,7 @@ def perform_renewal_with_browser():
         except:
             pass
 
+        # ---- 获取当前过期时间 ----
         old_expiry_str = None
         expiry_selectors = ['#expireDate', '.expiry-date', 'span:contains("Expires")', 'div:contains("Expires")']
         for sel in expiry_selectors:
@@ -358,7 +345,7 @@ def perform_renewal_with_browser():
                 continue
         print(f"📅 Current expiry (raw): {old_expiry_str}")
 
-        # 触发 reCAPTCHA
+        # ---- 触发 reCAPTCHA ----
         try:
             recaptcha_checkbox = sb.find_element('.g-recaptcha', timeout=5)
             if recaptcha_checkbox:
@@ -371,6 +358,7 @@ def perform_renewal_with_browser():
         print("⏳ 等待 reCAPTCHA 图像加载...")
         time.sleep(8)
 
+        # ---- 提取问题 ----
         try:
             question_code = extract_question_from_page(sb)
             print(f"🧩 Question code: {question_code}")
@@ -379,6 +367,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "question_failed")
             return False, None, error_msg, server_name
 
+        # ---- 截图并打码 ----
         try:
             captcha_img = capture_recaptcha_image(sb)
             print("📸 reCAPTCHA image captured and resized to 300x300")
@@ -395,6 +384,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "api_failed")
             return False, None, error_msg, server_name
 
+        # ---- 点击网格 ----
         try:
             click_recaptcha_grid(sb, objects, grid_size)
             print("✅ reCAPTCHA grid clicked")
@@ -404,6 +394,7 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "click_grid_failed")
             return False, None, error_msg, server_name
 
+        # ---- 点击续期按钮 ----
         print("🔘 Clicking Renew server button...")
         clicked = False
         btn_selectors = [
@@ -437,6 +428,7 @@ def perform_renewal_with_browser():
         print("⏳ 等待续期完成...")
         time.sleep(10)
 
+        # ---- 刷新页面获取新日期 ----
         print("🔄 Refreshing page...")
         sb.open(RENEW_URL)
         sb.wait_for_ready_state_complete()
