@@ -79,62 +79,78 @@ def send_tg_message(token, chat_id, text):
     except Exception as e:
         log(f"Telegram 消息异常: {e}", "ERROR")
 
-# ==================== cron-job.org 定时任务管理 ====================
+# ==================== cron-job.org 定时任务管理（基于绝对时间，参考 Therose cloud） ====================
 def ensure_cronjob():
     """
-    在 cron-job.org 上创建或更新定时任务，每 450 分钟（7小时30分）触发一次 GitHub Actions。
+    在 cron-job.org 上创建或更新定时任务，设置为在当前 UTC 时间 + 450 分钟的时刻执行一次。
     如果已有任务 ID（CRONJOB_JOB_ID），则更新；否则创建。
     """
     if not CRONJOB_API_KEY or not GH_TOKEN or not REPO_OWNER or not REPO_NAME:
         log("缺少 CRONJOB_API_KEY 或 GH_TOKEN 等环境变量，跳过定时任务设置", "WARN")
         return None, False
 
-    # 构建 GitHub Actions 触发 URL
-    trigger_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/workflows/{WORKFLOW_FILE}/dispatches"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {GH_TOKEN}",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "Content-Type": "application/json"
-    }
-    body = json.dumps({"ref": BRANCH})
+    # 计算下次触发时间：当前 UTC 时间 + 450 分钟
+    now = datetime.now(timezone.utc)
+    next_time = now + timedelta(minutes=450)
+    minute = next_time.minute
+    hour = next_time.hour
+    day = next_time.day
+    month = next_time.month
+    expires_at = (next_time + timedelta(minutes=5)).strftime("%Y%m%d%H%M%S")
 
-    # 任务定义（严格按照 cron-job.org API v1 规范）
-    job = {
-        "enabled": True,
-        "url": trigger_url,
-        "title": f"Host2Play Renewal ({REPO_NAME})",
-        "requestMethod": 1,                     # 1 = POST
-        "saveResponses": True,
-        "extendedData": {
-            "headers": headers,
-            "body": body
-        },
-        "schedule": {
-            "type": "interval",
-            "interval_value": 450,              # 450 分钟
-            "interval_unit": "minutes"
+    # 构建 GitHub Actions 触发 URL
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/workflows/{WORKFLOW_FILE}/dispatches"
+
+    # 任务定义（与 Therose cloud 脚本完全一致）
+    payload = {
+        "job": {
+            "enabled": True,
+            "url": url,
+            "requestMethod": 1,                     # 1 = POST
+            "saveResponses": True,
+            "schedule": {
+                "minutes": [minute],
+                "hours": [hour],
+                "mdays": [day],
+                "months": [month],
+                "wdays": [-1],
+                "timezone": "UTC",
+                "expiresAt": expires_at
+            },
+            "extendedData": {
+                "headers": {
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {GH_TOKEN}",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                    "Content-Type": "application/json",
+                    "User-Agent": "cron-job.org/1.0"
+                },
+                "body": json.dumps({"ref": BRANCH})
+            }
         }
     }
 
-    auth_headers = {"Authorization": f"Bearer {CRONJOB_API_KEY}"}
+    auth_headers = {
+        "Authorization": f"Bearer {CRONJOB_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
     if CRONJOB_JOB_ID:
         # 更新现有任务
-        url = f"https://api.cron-job.org/jobs/{CRONJOB_JOB_ID}"
+        api_url = f"https://api.cron-job.org/jobs/{CRONJOB_JOB_ID}"
         method = "PATCH"
         log(f"更新 cron-job ID: {CRONJOB_JOB_ID}")
     else:
         # 创建新任务
-        url = "https://api.cron-job.org/jobs"
+        api_url = "https://api.cron-job.org/jobs"
         method = "PUT"
         log("创建新 cron-job 任务")
 
-    # 调试输出
-    log(f"请求 URL: {method} {url}")
-    log(f"请求体: {json.dumps({'job': job}, indent=2)}")
+    log(f"请求 URL: {method} {api_url}")
+    log(f"请求体: {json.dumps(payload, indent=2)}")
 
     try:
-        resp = requests.request(method, url, json={"job": job}, headers=auth_headers, timeout=20)
+        resp = requests.request(method, api_url, headers=auth_headers, json=payload, timeout=30)
         log(f"响应状态码: {resp.status_code}")
         log(f"响应内容: {resp.text[:500]}")
         resp.raise_for_status()
