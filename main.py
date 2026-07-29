@@ -82,9 +82,8 @@ def send_tg_message(token, chat_id, text):
 # ==================== cron-job.org 定时任务管理 ====================
 def ensure_cronjob():
     """
-    在 cron-job.org 上创建或更新定时任务，每 7小时30分 触发一次 GitHub Actions。
+    在 cron-job.org 上创建或更新定时任务，每 450 分钟（7小时30分）触发一次 GitHub Actions。
     如果已有任务 ID（CRONJOB_JOB_ID），则更新；否则创建。
-    返回 (job_id, success)
     """
     if not CRONJOB_API_KEY or not GH_TOKEN or not REPO_OWNER or not REPO_NAME:
         log("缺少 CRONJOB_API_KEY 或 GH_TOKEN 等环境变量，跳过定时任务设置", "WARN")
@@ -98,43 +97,49 @@ def ensure_cronjob():
         "X-GitHub-Api-Version": "2022-11-28",
         "Content-Type": "application/json"
     }
-    body = {"ref": BRANCH}
+    body = json.dumps({"ref": BRANCH})
 
-    # cron-job.org 任务定义（每 7小时30分 = 450 分钟）
-    job_data = {
-        "name": f"Host2Play Renewal ({REPO_NAME})",
+    # 任务定义（严格按照 cron-job.org API v1 规范）
+    job = {
+        "enabled": True,
         "url": trigger_url,
-        "request_method": "POST",
-        "request_headers": headers,
-        "request_body": json.dumps(body),
-        "type": "interval",
-        "interval_value": 450,          # 7小时30分 = 450 分钟
-        "interval_unit": "minutes",
-        "enabled": True
+        "title": f"Host2Play Renewal ({REPO_NAME})",
+        "requestMethod": 1,                     # 1 = POST
+        "saveResponses": True,
+        "extendedData": {
+            "headers": headers,
+            "body": body
+        },
+        "schedule": {
+            "type": "interval",
+            "interval_value": 450,              # 450 分钟
+            "interval_unit": "minutes"
+        }
     }
 
-    # 根据 cron-job.org API 文档：
-    # - 创建任务：PUT /jobs
-    # - 更新任务：PATCH /jobs/{jobId}
-    api_base = "https://api.cron-job.org"
-    auth = {"Authorization": f"Bearer {CRONJOB_API_KEY}"}
-
+    auth_headers = {"Authorization": f"Bearer {CRONJOB_API_KEY}"}
     if CRONJOB_JOB_ID:
-        # 更新已有任务（使用 PATCH）
-        url = f"{api_base}/jobs/{CRONJOB_JOB_ID}"
+        # 更新现有任务
+        url = f"https://api.cron-job.org/jobs/{CRONJOB_JOB_ID}"
         method = "PATCH"
         log(f"更新 cron-job ID: {CRONJOB_JOB_ID}")
     else:
-        # 创建新任务（使用 PUT）
-        url = f"{api_base}/jobs"
+        # 创建新任务
+        url = "https://api.cron-job.org/jobs"
         method = "PUT"
         log("创建新 cron-job 任务")
 
+    # 调试输出
+    log(f"请求 URL: {method} {url}")
+    log(f"请求体: {json.dumps({'job': job}, indent=2)}")
+
     try:
-        resp = requests.request(method, url, json={"job": job_data}, headers=auth, timeout=20)
+        resp = requests.request(method, url, json={"job": job}, headers=auth_headers, timeout=20)
+        log(f"响应状态码: {resp.status_code}")
+        log(f"响应内容: {resp.text[:500]}")
         resp.raise_for_status()
         result = resp.json()
-        job_id = result.get("jobId") or result.get("id")
+        job_id = result.get("jobId")
         if not CRONJOB_JOB_ID and job_id:
             log(f"✅ cron-job 创建成功，ID: {job_id}")
             log("💡 请将 CRONJOB_JOB_ID 添加到仓库 Secrets 中，以避免重复创建")
@@ -147,10 +152,8 @@ def ensure_cronjob():
         return job_id, True
     except Exception as e:
         log(f"cron-job 管理失败: {e}", "ERROR")
-        # 如果返回 404 且 CRONJOB_JOB_ID 存在但无效，尝试重新创建
         if "404" in str(e) and CRONJOB_JOB_ID:
             log("⚠️ 任务 ID 无效，尝试重新创建...", "WARN")
-            # 清除无效 ID，递归重试
             os.environ["CRONJOB_JOB_ID"] = ""
             return ensure_cronjob()
         return None, False
@@ -444,7 +447,6 @@ def recognize_audio_via_api(mp3_path):
             resp = requests.post(api_url, files=files, headers=headers, timeout=30)
             resp.raise_for_status()
             result = resp.json()
-            # 假设返回格式包含 'text' 或 'result' 或 'data'
             text = result.get("text") or result.get("result") or result.get("data")
             if text and len(text) > 0:
                 log(f"备用 API 识别结果: {text}")
@@ -701,7 +703,6 @@ def renew_single_url(url, attempt_idx: int = 0):
                 co.headless(False)
                 page = ChromiumPage(co)
 
-                # 反指纹注入
                 page.add_init_js("""
                     const getParameter = WebGLRenderingContext.prototype.getParameter;
                     WebGLRenderingContext.prototype.getParameter = function(parameter) {
@@ -722,7 +723,7 @@ def renew_single_url(url, attempt_idx: int = 0):
                 old_expire = get_expire_time(page)
                 log(f"服务器: {server_name}, 到期时间: {old_expire}")
 
-                # 清理遮挡广告
+                # 清理广告
                 page.run_js("""
                     const cssSelectors = ['ins.adsbygoogle', 'iframe[src*="ads"]', '.modal-backdrop'];
                     cssSelectors.forEach(sel => {
@@ -735,7 +736,7 @@ def renew_single_url(url, attempt_idx: int = 0):
                     consent_btn.click()
                     time.sleep(3)
 
-                # 积累鼠标轨迹和滚动数据
+                # 鼠标轨迹和滚动
                 for _ in range(3):
                     scroll_y = random.randint(200, 600)
                     page.scroll.down(scroll_y)
