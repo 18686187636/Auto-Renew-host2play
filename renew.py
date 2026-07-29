@@ -346,17 +346,30 @@ def perform_renewal_with_browser():
             return False, None, error_msg, server_name
         time.sleep(3)
 
-        # ========== 3. 勾选 reCAPTCHA 复选框 ==========
+        # ========== 3. 使用 UC 模式勾选 reCAPTCHA 复选框 ==========
+        print("🔘 正在尝试勾选 reCAPTCHA 复选框...")
         try:
-            recaptcha_checkbox = sb.find_element('.g-recaptcha', timeout=5)
-            if recaptcha_checkbox:
-                sb.uc_click('.g-recaptcha')
-                print("✅ 已勾选 I'm not a robot 复选框")
-                time.sleep(3)
-            else:
-                print("⚠️ 未找到 reCAPTCHA 复选框，可能已通过验证")
+            # 首选方法：uc_gui_click_captcha() 自动检测并点击
+            sb.uc_gui_click_captcha()
+            print("✅ 已勾选 I'm not a robot 复选框")
+            time.sleep(3)
         except Exception as e:
-            print(f"⚠️ 点击复选框失败: {e}")
+            print(f"⚠️ uc_gui_click_captcha 失败: {e}")
+            # 备用方法：手动切换到 iframe 中点击
+            try:
+                # 等待 iframe 出现
+                sb.wait_for_element('iframe[src*="recaptcha"]', timeout=10)
+                sb.switch_to_frame('iframe[src*="recaptcha"]')
+                # 点击复选框锚点
+                sb.wait_for_element('#recaptcha-anchor', timeout=5)
+                sb.click('#recaptcha-anchor')  # 使用普通 click 或 uc_click
+                print("✅ 通过手动切换 iframe 勾选成功")
+                sb.switch_to_default_content()
+                time.sleep(3)
+            except Exception as e2:
+                print(f"⚠️ 手动 iframe 方法也失败: {e2}")
+                sb.switch_to_default_content()
+                # 不抛出异常，继续尝试，可能已经自动通过
 
         # ========== 4. 等待图像验证加载 ==========
         print("⏳ 等待图像验证加载...")
