@@ -116,7 +116,6 @@ def solve_recaptcha_via_acedata(image_data, question_code):
         raise Exception("API 返回成功但无 objects 字段")
     return objects, solution.get("size", 300)
 
-# ==================== 修复后的 click_recaptcha_grid（使用 JavaScript 点击） ====================
 def click_recaptcha_grid(sb, objects, grid_size=300):
     try:
         iframes = sb.find_elements('iframe')
@@ -170,7 +169,6 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
     cell_w = width / cols
     cell_h = height / rows
 
-    # 获取页面滚动偏移
     scroll_x = sb.execute_script("return window.scrollX;")
     scroll_y = sb.execute_script("return window.scrollY;")
 
@@ -179,11 +177,9 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
         col = idx % cols
         x = left + col * cell_w + cell_w / 2
         y = top + row * cell_h + cell_h / 2
-        # 转换为视口坐标
         viewport_x = x - scroll_x
         viewport_y = y - scroll_y
         print(f"🔘 Clicking index {idx} at viewport ({viewport_x:.0f}, {viewport_y:.0f})")
-        # 使用 JavaScript 在视口坐标处点击元素
         sb.execute_script(f"""
             var el = document.elementFromPoint({viewport_x}, {viewport_y});
             if (el) {{
@@ -689,7 +685,44 @@ def perform_renewal_with_browser():
             screenshot_step(sb, "click_grid_failed")
             return False, None, error_msg, server_name
 
-        # ========== 7. 第二次点击 Renew 提交 ==========
+        # ========== 7. 等待 reCAPTCHA 验证完成（对勾出现） ==========
+        print("⏳ 等待 reCAPTCHA 验证完成...")
+        verified = False
+        for attempt in range(15):  # 最多等待 15 秒
+            try:
+                # 检查 g-recaptcha-response 是否有值
+                token = sb.execute_script("""
+                    var textarea = document.getElementById('g-recaptcha-response');
+                    return textarea ? textarea.value : '';
+                """)
+                if token and token.strip():
+                    print(f"✅ 验证 token 已填充 (长度: {len(token)})")
+                    verified = True
+                    break
+                # 也可以检查是否有验证成功样式
+                # 在主页面或 iframe 中查找 recaptcha 对勾
+                time.sleep(1)
+            except:
+                time.sleep(1)
+                continue
+
+        if not verified:
+            print("⚠️ 未检测到验证成功，尝试等待额外的 5 秒...")
+            time.sleep(5)
+
+        # 再次确认 token 是否已填充
+        token = sb.execute_script("""
+            var textarea = document.getElementById('g-recaptcha-response');
+            return textarea ? textarea.value : '';
+        """)
+        if token and token.strip():
+            print("✅ 验证 token 已确认，可以提交续期")
+        else:
+            print("⚠️ 验证 token 仍为空，可能验证未完成")
+
+        screenshot_step(sb, "after_verification")
+
+        # ========== 8. 第二次点击 Renew（提交续期） ==========
         print("🔘 第二次点击 Renew（提交续期）...")
         if not click_renew():
             error_msg = "第二次点击失败"
@@ -697,17 +730,17 @@ def perform_renewal_with_browser():
             return False, None, error_msg, server_name
 
         screenshot_step(sb, "after_submit")
-        print("⏳ 等待续期处理...")
-        time.sleep(10)
+        print("⏳ 等待续期处理（15秒）...")
+        time.sleep(15)
 
-        # ---- 刷新页面 ----
+        # ---- 刷新页面获取新到期时间 ----
         print("🔄 刷新页面...")
         sb.open(RENEW_URL)
         sb.wait_for_ready_state_complete()
         sb.sleep(5)
         screenshot_step(sb, "after_reload")
 
-        # ========== 8. 提取新到期时间 ==========
+        # ========== 9. 提取新的到期时间 ==========
         new_expiry_str = None
         expiry_selectors = ['#expireDate', '.expiry-date', 'span:contains("Expires")', 'div:contains("Expires")']
         for sel in expiry_selectors:
@@ -723,6 +756,27 @@ def perform_renewal_with_browser():
                 continue
         print(f"📅 新到期时间: {new_expiry_str}")
         screenshot_step(sb, "expiry_found")
+
+        # 如果未获取到，尝试再次提交
+        if not new_expiry_str:
+            print("⚠️ 首次提交未获取到新到期时间，尝试再次提交...")
+            click_renew()
+            time.sleep(15)
+            sb.open(RENEW_URL)
+            sb.wait_for_ready_state_complete()
+            sb.sleep(5)
+            for sel in expiry_selectors:
+                try:
+                    elem = sb.find_element(sel, timeout=2)
+                    if elem:
+                        text = elem.text.strip()
+                        match = re.search(r'(\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?)', text)
+                        if match:
+                            new_expiry_str = match.group(1)
+                            break
+                except:
+                    continue
+            print(f"📅 二次尝试后新到期时间: {new_expiry_str}")
 
         if new_expiry_str:
             try:
@@ -799,7 +853,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal (final with JS click)")
+    print("🚀 Starting Host2Play renewal (final with verification wait)")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
