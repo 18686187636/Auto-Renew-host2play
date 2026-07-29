@@ -1,0 +1,6 @@
+DrissionPage
+xvfbwrapper
+requests
+SpeechRecognition
+pydub
+Pillow
