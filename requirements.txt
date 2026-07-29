@@ -2,4 +2,4 @@ requests>=2.28.0
 beautifulsoup4>=4.11.0
 pytz>=2022.7
 seleniumbase==4.22.3
-Pillow>=9.0.0   # 用于图像缩放和处理
+Pillow>=9.0.0
