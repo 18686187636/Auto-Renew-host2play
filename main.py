@@ -22,7 +22,7 @@ except ImportError:
 
 # ==================== 配置区域 ====================
 RENEW_URLS = [
-    "https://host2play.gratis/server/renew?i=62c3c856-9400-4220-9ec0-c3cd6348d5f8",
+    "https://host2play.gratis/server/renew?i=51b0dc2e-b901-46bf-b47a-20f5e6051459",
     # 添加更多链接
 ]
 
@@ -101,16 +101,57 @@ def update_github_secret(secret_name, secret_value):
         log(f"❌ 更新 Secret 异常: {e}", "ERROR")
         return False
 
-# ==================== cron-job.org 定时任务管理（增强重试） ====================
+# ==================== cron-job.org 定时任务管理（复用 + 重试） ====================
 def ensure_cronjob():
     """
     在 cron-job.org 上创建或更新定时任务，设置为在当前 UTC 时间 + 450 分钟的时刻执行一次。
-    若遇到 429/500 等临时错误，自动重试（指数退避，最多5次）。
-    创建新任务成功后，自动更新 CRONJOB_JOB_ID Secret。
+    若 CRONJOB_JOB_ID 未设置，先尝试复用现有任务（避免 PUT 限流）。
+    若创建/更新失败，自动重试（指数退避，最多5次）。
+    创建成功或复用成功后，自动更新 CRONJOB_JOB_ID Secret。
     """
     if not CRONJOB_API_KEY or not GH_TOKEN or not REPO_OWNER or not REPO_NAME:
         log("缺少 CRONJOB_API_KEY 或 GH_TOKEN 等环境变量，跳过定时任务设置", "WARN")
         return None, False
+
+    # 构建 GitHub Actions 触发 URL
+    trigger_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/workflows/{WORKFLOW_FILE}/dispatches"
+
+    # ===== 1. 如果 CRONJOB_JOB_ID 为空，尝试复用现有任务 =====
+    job_id = CRONJOB_JOB_ID
+    if not job_id:
+        log("🔍 CRONJOB_JOB_ID 未设置，尝试查找是否已有匹配的 cron-job...")
+        try:
+            list_resp = requests.get(
+                "https://api.cron-job.org/jobs",
+                headers={"Authorization": f"Bearer {CRONJOB_API_KEY}"},
+                timeout=30
+            )
+            if list_resp.status_code == 200:
+                jobs = list_resp.json().get("jobs", [])
+                for job in jobs:
+                    if job.get("url") == trigger_url:
+                        existing_id = job.get("jobId")
+                        log(f"✅ 找到已有任务 ID: {existing_id}")
+                        # 自动更新 Secret
+                        if update_github_secret("CRONJOB_JOB_ID", existing_id):
+                            log("✅ Secret 已更新，后续将使用此 ID 更新任务")
+                        else:
+                            log("⚠️ Secret 更新失败，请手动添加", "WARN")
+                            send_tg_message(
+                                TG_BOT_TOKEN, TG_CHAT_ID,
+                                f"🔄 找到已有 cron-job，ID: `{existing_id}`\n请手动将其添加到 GitHub Secrets 的 CRONJOB_JOB_ID"
+                            )
+                        # 将 ID 保存到全局环境变量以便后续使用
+                        os.environ["CRONJOB_JOB_ID"] = str(existing_id)
+                        job_id = str(existing_id)
+                        break
+            else:
+                log(f"⚠️ 无法获取任务列表 (HTTP {list_resp.status_code})，继续尝试创建", "WARN")
+        except Exception as e:
+            log(f"⚠️ 查询现有任务异常: {e}，继续尝试创建", "WARN")
+
+    # ===== 2. 若仍然没有 job_id，则创建新任务 =====
+    create_mode = not job_id
 
     # 计算下次触发时间：当前 UTC 时间 + 450 分钟
     now = datetime.now(timezone.utc)
@@ -121,35 +162,30 @@ def ensure_cronjob():
     month = next_time.month
     expires_at = (next_time + timedelta(minutes=5)).strftime("%Y%m%d%H%M%S")
 
-    # 构建 GitHub Actions 触发 URL
-    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/workflows/{WORKFLOW_FILE}/dispatches"
-
     # 任务定义
-    payload = {
-        "job": {
-            "enabled": True,
-            "url": url,
-            "requestMethod": 1,
-            "saveResponses": True,
-            "schedule": {
-                "minutes": [minute],
-                "hours": [hour],
-                "mdays": [day],
-                "months": [month],
-                "wdays": [-1],
-                "timezone": "UTC",
-                "expiresAt": expires_at
+    job_payload = {
+        "enabled": True,
+        "url": trigger_url,
+        "requestMethod": 1,
+        "saveResponses": True,
+        "schedule": {
+            "minutes": [minute],
+            "hours": [hour],
+            "mdays": [day],
+            "months": [month],
+            "wdays": [-1],
+            "timezone": "UTC",
+            "expiresAt": expires_at
+        },
+        "extendedData": {
+            "headers": {
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {GH_TOKEN}",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "Content-Type": "application/json",
+                "User-Agent": "cron-job.org/1.0"
             },
-            "extendedData": {
-                "headers": {
-                    "Accept": "application/vnd.github+json",
-                    "Authorization": f"Bearer {GH_TOKEN}",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                    "Content-Type": "application/json",
-                    "User-Agent": "cron-job.org/1.0"
-                },
-                "body": json.dumps({"ref": BRANCH})
-            }
+            "body": json.dumps({"ref": BRANCH})
         }
     }
 
@@ -158,52 +194,57 @@ def ensure_cronjob():
         "Content-Type": "application/json"
     }
 
-    if CRONJOB_JOB_ID:
-        api_url = f"https://api.cron-job.org/jobs/{CRONJOB_JOB_ID}"
-        method = "PATCH"
-        log(f"更新 cron-job ID: {CRONJOB_JOB_ID}")
-    else:
+    if create_mode:
         api_url = "https://api.cron-job.org/jobs"
         method = "PUT"
         log("创建新 cron-job 任务")
+    else:
+        api_url = f"https://api.cron-job.org/jobs/{job_id}"
+        method = "PATCH"
+        log(f"更新 cron-job ID: {job_id}")
 
     log(f"请求 URL: {method} {api_url}")
-    log(f"请求体: {json.dumps(payload, indent=2)}")
+    log(f"请求体: {json.dumps({'job': job_payload}, indent=2)}")
 
-    # ---- 增强重试逻辑（最多5次，指数退避） ----
+    # ---- 重试逻辑（最多5次，指数退避） ----
     max_retries = 5
-    wait_times = [5, 10, 20, 40, 80]  # 秒
+    wait_times = [10, 20, 40, 80, 120]  # 秒，针对创建任务限流更保守
 
     for attempt in range(max_retries):
         try:
-            resp = requests.request(method, api_url, headers=auth_headers, json=payload, timeout=30)
+            resp = requests.request(method, api_url, headers=auth_headers, json={"job": job_payload}, timeout=30)
             log(f"响应状态码: {resp.status_code}")
             log(f"响应内容: {resp.text[:500]}")
             resp.raise_for_status()
             result = resp.json()
-            job_id = result.get("jobId")
-            if not CRONJOB_JOB_ID and job_id:
-                log(f"✅ cron-job 创建成功，ID: {job_id}")
+            new_job_id = result.get("jobId")
+            if create_mode and new_job_id:
+                log(f"✅ cron-job 创建成功，ID: {new_job_id}")
                 # ---- 自动更新 Secret ----
                 if GH_TOKEN:
                     log("🔄 尝试自动更新 GitHub Secret CRONJOB_JOB_ID...")
-                    if update_github_secret("CRONJOB_JOB_ID", job_id):
+                    if update_github_secret("CRONJOB_JOB_ID", new_job_id):
                         log("✅ Secret 已自动更新，无需手动操作")
                     else:
                         log("⚠️ 自动更新失败，请手动将 ID 添加到 Secrets", "WARN")
                         send_tg_message(
                             TG_BOT_TOKEN, TG_CHAT_ID,
-                            f"🆕 cron-job 已创建，ID: `{job_id}`\n请手动将此 ID 添加到 GitHub Secrets 的 CRONJOB_JOB_ID"
+                            f"🆕 cron-job 已创建，ID: `{new_job_id}`\n请手动将此 ID 添加到 GitHub Secrets 的 CRONJOB_JOB_ID"
                         )
                 else:
                     log("⚠️ GH_TOKEN 未设置，无法自动更新 Secret", "WARN")
                     send_tg_message(
                         TG_BOT_TOKEN, TG_CHAT_ID,
-                        f"🆕 cron-job 已创建，ID: `{job_id}`\n请手动将此 ID 添加到 GitHub Secrets 的 CRONJOB_JOB_ID"
+                        f"🆕 cron-job 已创建，ID: `{new_job_id}`\n请手动将此 ID 添加到 GitHub Secrets 的 CRONJOB_JOB_ID"
                     )
-            elif CRONJOB_JOB_ID:
-                log(f"✅ cron-job {CRONJOB_JOB_ID} 更新成功")
-            return job_id, True
+                return new_job_id, True
+            elif not create_mode:
+                log(f"✅ cron-job {job_id} 更新成功")
+                return job_id, True
+            else:
+                # 理论上不会走到这里
+                log("⚠️ 响应中未包含 jobId", "WARN")
+                return None, False
         except requests.exceptions.RequestException as e:
             if resp.status_code in (429, 500, 502, 503, 504):
                 wait = wait_times[attempt] if attempt < len(wait_times) else 60
@@ -212,7 +253,7 @@ def ensure_cronjob():
                 continue
             else:
                 log(f"cron-job 管理失败: {e}", "ERROR")
-                if "404" in str(e) and CRONJOB_JOB_ID:
+                if "404" in str(e) and not create_mode:
                     log("⚠️ 任务 ID 无效，尝试重新创建...", "WARN")
                     os.environ["CRONJOB_JOB_ID"] = ""
                     return ensure_cronjob()  # 递归重试一次
@@ -221,8 +262,8 @@ def ensure_cronjob():
         log(f"❌ 在 {max_retries} 次重试后仍然失败，请稍后手动检查 cron-job", "ERROR")
         send_tg_message(
             TG_BOT_TOKEN, TG_CHAT_ID,
-            f"⚠️ cron-job 更新失败（429 限流），请手动检查 cron-job.org 任务状态。\n"
-            f"当前任务 ID: {CRONJOB_JOB_ID or '(无)'}"
+            f"⚠️ cron-job 更新失败（限流或网络问题），请手动检查 cron-job.org 任务状态。\n"
+            f"当前任务 ID: {job_id or '(无)'}"
         )
         return None, False
 
