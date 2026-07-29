@@ -79,12 +79,17 @@ def send_tg_message(token, chat_id, text):
     except Exception as e:
         log(f"Telegram 消息异常: {e}", "ERROR")
 
-# ==================== 获取 GitHub 工作流 ID（增强匹配） ====================
+# ==================== 获取 GitHub 工作流 ID（最终版） ====================
 def get_github_workflow_id(owner, repo, workflow_file, token):
-    """通过 GitHub API 获取工作流文件的数字 ID（支持多种输入格式）"""
-    # 清理输入：去除首尾空格、引号
-    workflow_file = workflow_file.strip().strip('"').strip("'")
-    log(f"🔍 尝试获取工作流 ID，输入文件名: '{workflow_file}'", "DEBUG")
+    """通过 GitHub API 获取工作流文件的数字 ID（强制清理不可见字符，增强匹配）"""
+    # 强制清理：去除首尾空白、引号、换行、回车、制表符
+    workflow_file = workflow_file.strip().strip('"').strip("'").replace('\r', '').replace('\n', '').replace('\t', '')
+    log(f"🔍 清理后的输入: '{workflow_file}'", "DEBUG")
+
+    # ===== 备选方案：如果匹配一直失败，可以取消注释下面的硬编码 =====
+    # log("⚠️ 使用硬编码的工作流 ID（319911948）", "WARN")
+    # return 319911948
+    # ============================================================
 
     url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows"
     headers = {
@@ -99,7 +104,7 @@ def get_github_workflow_id(owner, repo, workflow_file, token):
         workflows = data.get("workflows", [])
         log(f"📋 仓库中的工作流: {[wf['path'] for wf in workflows]}", "DEBUG")
 
-        # 准备候选匹配项（多种格式）
+        # 构建候选匹配列表
         candidates = []
         if workflow_file.startswith(".github/workflows/"):
             candidates.append(workflow_file)
@@ -107,17 +112,19 @@ def get_github_workflow_id(owner, repo, workflow_file, token):
             candidates.append(f".github/workflows/{workflow_file}")
         candidates.append(workflow_file)
         candidates.append(os.path.basename(workflow_file))
-
-        # 去重
+        # 去重并保留顺序
         candidates = list(dict.fromkeys(candidates))
-        log(f"🔍 将尝试匹配以下路径: {candidates}", "DEBUG")
+        log(f"🔍 候选匹配项: {candidates}", "DEBUG")
 
         for wf in workflows:
             wf_path = wf.get("path", "")
-            for cand in candidates:
-                if wf_path == cand or os.path.basename(wf_path) == cand:
-                    log(f"✅ 找到匹配的工作流: {wf_path} (ID: {wf.get('id')})")
-                    return wf.get("id")
+            if (wf_path == workflow_file or
+                wf_path == f".github/workflows/{workflow_file}" or
+                os.path.basename(wf_path) == os.path.basename(workflow_file) or
+                wf_path.endswith(workflow_file) or
+                workflow_file in wf_path):
+                log(f"✅ 找到匹配的工作流: {wf_path} (ID: {wf.get('id')})")
+                return wf.get("id")
 
         log(f"❌ 未找到任何匹配的工作流。尝试的文件名: {candidates}", "ERROR")
         return None
