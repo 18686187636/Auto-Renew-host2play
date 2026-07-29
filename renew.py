@@ -241,12 +241,11 @@ def perform_renewal_with_browser():
     ip = get_current_ip(proxy_for_ip)
     print(f"📍 当前出口 IP: {ip}")
 
-    # 构建 SeleniumBase 参数（仅支持标准参数）
+    # 构建 SeleniumBase 参数（移除了 user_agent，兼容新版）
     sb_kwargs = {
         "uc": True,                  # 使用 undetected-chromedriver
         "headless": True,
-        "page_load_strategy": "eager",
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        "page_load_strategy": "eager"
     }
     if PROXY:
         sb_kwargs["proxy"] = PROXY
@@ -256,6 +255,15 @@ def perform_renewal_with_browser():
 
     with SB(**sb_kwargs) as sb:
         # ---- 使用 CDP 注入反检测脚本（在导航之前） ----
+        try:
+            # 可选：通过 CDP 设置自定义 User-Agent（若需要）
+            sb.driver.execute_cdp_cmd('Network.setUserAgentOverride', {
+                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            })
+            print("✅ 自定义 User-Agent 已设置")
+        except Exception as e:
+            print(f"⚠️ 设置 User-Agent 失败（非关键）: {e}")
+
         try:
             sb.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
                 "source": """
