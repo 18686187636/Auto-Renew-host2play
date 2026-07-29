@@ -27,7 +27,7 @@ REPO_OWNER = os.getenv("REPO_OWNER")
 REPO_NAME = os.getenv("REPO_NAME")
 WORKFLOW_FILE = os.getenv("WORKFLOW_FILE", "renew.yml")
 BRANCH = os.getenv("BRANCH", "main")
-PROXY = os.getenv("PROXY")  # socks5://127.0.0.1:1080
+PROXY = os.getenv("PROXY")
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")
 
 # ==================== 辅助函数 ====================
@@ -145,57 +145,100 @@ def click_recaptcha_grid(sb, objects, grid_size=300):
         time.sleep(0.5)
     sb.switch_to_default_content()
 
+# ========== 改进后的 extract_question_from_page ==========
 def extract_question_from_page(sb):
-    question_text = None
+    # 方法1：传统方式 - 在主页和 iframe 中查找指定类
     try:
         elem = sb.find_element('.rc-imageselect-instructions', timeout=3)
         if elem:
-            question_text = elem.text.strip()
+            text = elem.text.strip()
+            if text:
+                return text
     except:
         pass
-    if not question_text:
-        try:
-            iframes = sb.find_elements('iframe[src*="recaptcha"]')
-            for iframe in iframes:
-                sb.switch_to_frame(iframe)
-                try:
-                    elem = sb.find_element('.rc-imageselect-instructions', timeout=2)
-                    if elem:
-                        question_text = elem.text.strip()
-                        break
-                except:
-                    continue
+
+    try:
+        iframes = sb.find_elements('iframe[src*="recaptcha"]')
+        for iframe in iframes:
+            sb.switch_to_frame(iframe)
+            try:
+                elem = sb.find_element('.rc-imageselect-instructions', timeout=2)
+                if elem:
+                    text = elem.text.strip()
+                    if text:
+                        sb.switch_to_default_content()
+                        return text
+            except:
+                pass
             sb.switch_to_default_content()
+    except:
+        pass
+
+    # 方法2：使用 JavaScript 在所有 iframe 和主页面中搜索关键词
+    js_code = """
+    function findQuestion() {
+        var keywords = ['选择', '点击', '图片', '图像', '包含', '所有', '请选择', '请点击', 'select', 'click', 'image'];
+        var texts = [];
+
+        var bodyText = document.body.innerText || '';
+        texts.push(bodyText);
+
+        var iframes = document.getElementsByTagName('iframe');
+        for (var i = 0; i < iframes.length; i++) {
+            try {
+                var iframeDoc = iframes[i].contentDocument || iframes[i].contentWindow.document;
+                if (iframeDoc) {
+                    var iframeText = iframeDoc.body.innerText || '';
+                    texts.push(iframeText);
+                }
+            } catch(e) {}
+        }
+
+        var fullText = texts.join('\\n');
+        var lines = fullText.split('\\n');
+
+        for (var j = 0; j < lines.length; j++) {
+            var line = lines[j].trim();
+            if (line.length === 0) continue;
+            for (var k = 0; k < keywords.length; k++) {
+                if (line.toLowerCase().indexOf(keywords[k].toLowerCase()) !== -1) {
+                    return line;
+                }
+            }
+        }
+
+        for (var j = 0; j < lines.length; j++) {
+            var line = lines[j].trim();
+            if (line.length > 10) {
+                return line;
+            }
+        }
+        return null;
+    }
+    return findQuestion();
+    """
+    question_text = sb.execute_script(js_code)
+    if question_text and question_text.strip():
+        return question_text.strip()
+    else:
+        # 保存页面源码以便调试
+        with open("page_source_debug.html", "w", encoding="utf-8") as f:
+            f.write(sb.get_page_source())
+        # 保存所有 iframe 内容
+        try:
+            iframes = sb.find_elements('iframe')
+            for idx, iframe in enumerate(iframes):
+                try:
+                    sb.switch_to_frame(iframe)
+                    with open(f"iframe_{idx}_debug.html", "w", encoding="utf-8") as f:
+                        f.write(sb.get_page_source())
+                    sb.switch_to_default_content()
+                except:
+                    sb.switch_to_default_content()
+                    continue
         except:
             pass
-    if not question_text:
-        raise Exception("Could not find reCAPTCHA question text")
-    question_map = {
-        "出租车": "/m/0pg52",
-        "巴士": "/m/01bjv",
-        "校车": "/m/02yvhj",
-        "摩托车": "/m/04_sv",
-        "拖拉机": "/m/013xlm",
-        "烟囱": "/m/01jk_4",
-        "人行横道": "/m/014xcs",
-        "红绿灯": "/m/015qff",
-        "自行车": "/m/0199g",
-        "停车计价表": "/m/015qbp",
-        "汽车": "/m/0k4j",
-        "桥": "/m/015kr",
-        "船": "/m/019jd",
-        "棕榈树": "/m/0cdl1",
-        "山": "/m/09d_r",
-        "消防栓": "/m/01pns0",
-        "楼梯": "/m/01lynh"
-    }
-    for cn, code in question_map.items():
-        if cn in question_text:
-            return code
-    match = re.search(r'/m/[a-z0-9]+', question_text)
-    if match:
-        return match.group(0)
-    raise Exception(f"Unrecognized question: {question_text}")
+        raise Exception("Could not find reCAPTCHA question text. Page source saved for debugging.")
 
 def capture_recaptcha_image(sb):
     try:
@@ -241,11 +284,10 @@ def perform_renewal_with_browser():
     ip = get_current_ip(PROXY if PROXY else None)
     print(f"📍 出口 IP: {ip}")
 
-    # ========== 关键修改：使用 xvfb 虚拟显示 ==========
     sb_kwargs = {
         "uc": True,
-        "headless": False,      # 必须设为 False 才能启用 xvfb
-        "xvfb": True,           # 启用虚拟显示，解决无头模式下点击复选框失败的问题
+        "headless": False,      # 启用 Xvfb 时必须为 False
+        "xvfb": True,
         "page_load_strategy": "eager"
     }
     if PROXY:
@@ -350,7 +392,7 @@ def perform_renewal_with_browser():
                 pass
             return False
 
-        # ========== 2. 获取 sitekey（仅用于显示） ==========
+        # ========== 2. 获取 sitekey ==========
         sitekey = sb.execute_script("""
             var elem = document.querySelector('.g-recaptcha');
             if (elem) return elem.getAttribute('data-sitekey');
@@ -368,13 +410,13 @@ def perform_renewal_with_browser():
         time.sleep(3)
         screenshot_step(sb, "after_first_renew")
 
-        # ========== 4. 手动勾选复选框（现在 xvfb 已启用，可以正常点击） ==========
+        # ========== 4. 手动勾选复选框 ==========
         print("🔘 手动勾选 reCAPTCHA 复选框...")
         try:
             sb.wait_for_element('iframe[src*="recaptcha"]', timeout=10)
             sb.switch_to_frame('iframe[src*="recaptcha"]')
             sb.wait_for_element('#recaptcha-anchor', timeout=5)
-            sb.click('#recaptcha-anchor')   # 现在使用普通 click，因为 xvfb 提供了显示环境
+            sb.click('#recaptcha-anchor')
             print("✅ 已勾选")
             sb.switch_to_default_content()
             time.sleep(3)
@@ -383,30 +425,66 @@ def perform_renewal_with_browser():
             print(f"⚠️ 勾选失败: {e}")
             sb.switch_to_default_content()
             screenshot_step(sb, "checkbox_error")
-            # 如果勾选失败，尝试通过 CDP 点击（备用方案）
+            # 备用：尝试 CDP 点击
             try:
-                print("🔄 尝试使用 CDP 点击复选框...")
+                print("🔄 尝试 CDP 点击复选框...")
                 sb.cdp.gui_click_element('#recaptcha-anchor')
                 print("✅ CDP 点击成功")
                 screenshot_step(sb, "checkbox_cdp")
-            except:
-                print("❌ CDP 点击也失败")
+            except Exception as e2:
+                print(f"❌ CDP 点击也失败: {e2}")
 
-        # ========== 5. 等待并提取问题文本（循环尝试） ==========
+        # ========== 5. 等待并提取问题文本 ==========
         print("⏳ 等待图像验证并提取问题...")
+        print(f"📄 当前页面标题: {sb.get_title()}")
+        print(f"🔗 当前 URL: {sb.get_current_url()}")
+        screenshot_step(sb, "before_extract")
+
         question_code = None
         max_attempts = 8
         for attempt in range(max_attempts):
             try:
-                question_code = extract_question_from_page(sb)
-                print(f"🧩 问题代码: {question_code}")
-                screenshot_step(sb, "question_extracted")
-                break
+                question_text = extract_question_from_page(sb)
+                print(f"🧩 提取到的问题文本: {question_text}")
+                # 将问题文本转换为问题代码（映射）
+                question_map = {
+                    "出租车": "/m/0pg52",
+                    "巴士": "/m/01bjv",
+                    "校车": "/m/02yvhj",
+                    "摩托车": "/m/04_sv",
+                    "拖拉机": "/m/013xlm",
+                    "烟囱": "/m/01jk_4",
+                    "人行横道": "/m/014xcs",
+                    "红绿灯": "/m/015qff",
+                    "自行车": "/m/0199g",
+                    "停车计价表": "/m/015qbp",
+                    "汽车": "/m/0k4j",
+                    "桥": "/m/015kr",
+                    "船": "/m/019jd",
+                    "棕榈树": "/m/0cdl1",
+                    "山": "/m/09d_r",
+                    "消防栓": "/m/01pns0",
+                    "楼梯": "/m/01lynh"
+                }
+                question_code = None
+                for cn, code in question_map.items():
+                    if cn in question_text:
+                        question_code = code
+                        break
+                if not question_code:
+                    match = re.search(r'/m/[a-z0-9]+', question_text)
+                    if match:
+                        question_code = match.group(0)
+                if question_code:
+                    print(f"🧩 问题代码: {question_code}")
+                    screenshot_step(sb, "question_extracted")
+                    break
+                else:
+                    print(f"⚠️ 无法从问题文本中提取代码: {question_text}")
             except Exception as e:
                 print(f"尝试 {attempt+1}/{max_attempts} 提取失败: {e}")
                 time.sleep(2)
                 if attempt == 3:
-                    # 中途尝试重新触发
                     print("⚠️ 尝试重新触发验证...")
                     click_renew()
                     time.sleep(3)
@@ -557,7 +635,7 @@ def ensure_cronjob():
 
 # ==================== 主入口 ====================
 def main():
-    print("🚀 Starting Host2Play renewal (xvfb mode with full screenshots)")
+    print("🚀 Starting Host2Play renewal (xvfb mode with enhanced extraction)")
     success, new_expiry, error, server_name = perform_renewal_with_browser()
 
     if success and new_expiry:
