@@ -79,17 +79,15 @@ def send_tg_message(token, chat_id, text):
     except Exception as e:
         log(f"Telegram 消息异常: {e}", "ERROR")
 
-# ==================== 获取 GitHub 工作流 ID（最终版） ====================
+# ==================== 获取 GitHub 工作流 ID ====================
 def get_github_workflow_id(owner, repo, workflow_file, token):
-    """通过 GitHub API 获取工作流文件的数字 ID（强制清理不可见字符，增强匹配）"""
-    # 强制清理：去除首尾空白、引号、换行、回车、制表符
+    """通过 GitHub API 获取工作流文件的数字 ID（增强匹配）"""
     workflow_file = workflow_file.strip().strip('"').strip("'").replace('\r', '').replace('\n', '').replace('\t', '')
     log(f"🔍 清理后的输入: '{workflow_file}'", "DEBUG")
 
-    # ===== 备选方案：如果匹配一直失败，可以取消注释下面的硬编码 =====
+    # 如果匹配经常失败，可取消注释以下硬编码
     # log("⚠️ 使用硬编码的工作流 ID（319911948）", "WARN")
     # return 319911948
-    # ============================================================
 
     url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows"
     headers = {
@@ -104,7 +102,6 @@ def get_github_workflow_id(owner, repo, workflow_file, token):
         workflows = data.get("workflows", [])
         log(f"📋 仓库中的工作流: {[wf['path'] for wf in workflows]}", "DEBUG")
 
-        # 构建候选匹配列表
         candidates = []
         if workflow_file.startswith(".github/workflows/"):
             candidates.append(workflow_file)
@@ -112,7 +109,6 @@ def get_github_workflow_id(owner, repo, workflow_file, token):
             candidates.append(f".github/workflows/{workflow_file}")
         candidates.append(workflow_file)
         candidates.append(os.path.basename(workflow_file))
-        # 去重并保留顺序
         candidates = list(dict.fromkeys(candidates))
         log(f"🔍 候选匹配项: {candidates}", "DEBUG")
 
@@ -132,11 +128,46 @@ def get_github_workflow_id(owner, repo, workflow_file, token):
         log(f"❌ 获取工作流 ID 失败: {e}", "ERROR")
         return None
 
-# ==================== cron-job.org 定时任务管理 ====================
+# ==================== cron-job.org 定时任务管理（更新版） ====================
+def list_cronjobs(api_key):
+    """获取当前用户的所有 cron-job 任务"""
+    try:
+        resp = requests.get(
+            "https://api.cron-job.org/jobs",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=30
+        )
+        if resp.status_code == 200:
+            return resp.json().get("jobs", [])
+        else:
+            log(f"获取任务列表失败: HTTP {resp.status_code}", "ERROR")
+            return []
+    except Exception as e:
+        log(f"获取任务列表异常: {e}", "ERROR")
+        return []
+
+def delete_cronjob(api_key, job_id):
+    """删除指定的 cron-job"""
+    try:
+        resp = requests.delete(
+            f"https://api.cron-job.org/jobs/{job_id}",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=30
+        )
+        if resp.status_code == 200:
+            log(f"已删除旧任务 ID: {job_id}")
+            return True
+        else:
+            log(f"删除任务 {job_id} 失败: HTTP {resp.status_code}", "ERROR")
+            return False
+    except Exception as e:
+        log(f"删除任务异常: {e}", "ERROR")
+        return False
+
 def schedule_cronjob(trigger_timestamp):
     """
-    使用 cron-job.org API 创建定时任务，触发时间为 trigger_timestamp（Unix 时间戳）。
-    使用数字工作流 ID 构造 URL。
+    使用 cron-job.org API 创建或更新定时任务，确保只有一个任务。
+    如果存在匹配的旧任务，则更新其时间；否则新建。
     """
     if not CRONJOB_API_KEY or not GH_TOKEN or not REPO_OWNER or not REPO_NAME:
         log("缺少 CRONJOB_API_KEY 或 GH_TOKEN 等环境变量，跳过定时任务设置", "WARN")
@@ -159,25 +190,24 @@ def schedule_cronjob(trigger_timestamp):
         "expiresAt": (dt + timedelta(minutes=5)).strftime("%Y%m%d%H%M%S")
     }
 
-    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/workflows/{workflow_id}/dispatches"
+    github_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/workflows/{workflow_id}/dispatches"
 
-    payload = {
-        "job": {
-            "enabled": True,
-            "url": url,
-            "requestMethod": 1,
-            "saveResponses": True,
-            "schedule": schedule,
-            "extendedData": {
-                "headers": {
-                    "Accept": "application/vnd.github+json",
-                    "Authorization": f"Bearer {GH_TOKEN}",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                    "Content-Type": "application/json",
-                    "User-Agent": "cron-job.org/1.0"
-                },
-                "body": json.dumps({"ref": BRANCH})
-            }
+    # 构造任务体（用于新建和更新）
+    job_payload = {
+        "enabled": True,
+        "url": github_url,
+        "requestMethod": 1,
+        "saveResponses": True,
+        "schedule": schedule,
+        "extendedData": {
+            "headers": {
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {GH_TOKEN}",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "Content-Type": "application/json",
+                "User-Agent": "cron-job.org/1.0"
+            },
+            "body": json.dumps({"ref": BRANCH})
         }
     }
 
@@ -186,9 +216,47 @@ def schedule_cronjob(trigger_timestamp):
         "Content-Type": "application/json"
     }
 
-    log(f"📤 发送请求到 cron-job.org，触发时间: {dt.strftime('%Y-%m-%d %H:%M UTC')}")
-    log(f"请求体: {json.dumps(payload, indent=2)}")
+    # 1. 获取所有任务，查找是否有匹配的（按 url 匹配）
+    existing_jobs = list_cronjobs(CRONJOB_API_KEY)
+    matched_job = None
+    for job in existing_jobs:
+        if job.get("url") == github_url:
+            matched_job = job
+            break
 
+    if matched_job:
+        job_id = matched_job.get("jobId")
+        log(f"📌 找到已存在的任务 ID: {job_id}，将更新其触发时间")
+        # 使用 PATCH 更新任务
+        patch_url = f"https://api.cron-job.org/jobs/{job_id}"
+        try:
+            resp = requests.patch(
+                patch_url,
+                headers=headers,
+                json={"job": job_payload},   # 注意 API 要求外层包裹 "job"
+                timeout=30
+            )
+            log(f"响应状态码: {resp.status_code}")
+            log(f"响应内容: {resp.text[:500]}")
+            if resp.status_code == 200:
+                log(f"✅ cron-job 更新成功，ID: {job_id}")
+                send_tg_message(
+                    TG_BOT_TOKEN, TG_CHAT_ID,
+                    f"🔄 cron-job 已更新，ID: `{job_id}`\n新触发时间: {dt.strftime('%Y-%m-%d %H:%M UTC')}"
+                )
+                return True
+            else:
+                log(f"❌ 更新失败，尝试删除后重建", "WARN")
+                # 更新失败时尝试删除再新建
+                delete_cronjob(CRONJOB_API_KEY, job_id)
+                # 继续执行新建逻辑
+        except Exception as e:
+            log(f"❌ 更新异常: {e}，尝试删除后重建", "ERROR")
+            delete_cronjob(CRONJOB_API_KEY, job_id)
+
+    # 2. 新建任务（如果没有匹配或更新失败后重建）
+    log("📤 创建新的 cron-job")
+    payload = {"job": job_payload}
     try:
         resp = requests.put("https://api.cron-job.org/jobs", headers=headers, json=payload, timeout=30)
         log(f"响应状态码: {resp.status_code}")
@@ -910,9 +978,9 @@ def renew_single_url(url, attempt_idx: int = 0):
 
 # ==================== 主入口 ====================
 def main():
-    # 调度下次执行（当前时间 + 450 分钟）
+    # 调度下次执行（当前时间 + 7 小时 = 420 分钟）
     now = datetime.now(timezone.utc)
-    next_run = now + timedelta(minutes=450)
+    next_run = now + timedelta(minutes=420)
     trigger_timestamp = next_run.timestamp()
     schedule_cronjob(trigger_timestamp)
 
